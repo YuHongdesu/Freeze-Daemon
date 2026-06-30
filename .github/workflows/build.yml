@@ -12,11 +12,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. 拉取代码
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2. 安装 Android NDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
@@ -25,7 +23,6 @@ jobs:
           echo "y" | sdkmanager "ndk;27.2.12479018"
           echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> $GITHUB_ENV
 
-      # 3. 安装宿主机工具链
       - name: Install host toolchain
         run: |
           sudo apt-get update -q
@@ -33,23 +30,20 @@ jobs:
             clang llvm \
             libelf-dev zlib1g-dev \
             libbpf-dev \
-            linux-headers-$(uname -r) \
-            bpftool
+            linux-headers-$(uname -r)
 
-      # 4. 编译 eBPF 字节码（修复 vmlinux.h 问题）
+      # 4. 编译 eBPF（智能本地合规检查）
       - name: Compile eBPF program
         run: |
-          # 生成 vmlinux.h（最可靠方式）
-          if [ -f /sys/kernel/btf/vmlinux ]; then
-            bpftool btf dump file /sys/kernel/btf/vmlinux format c > /tmp/vmlinux.h
-            echo "Generated vmlinux.h from host BTF"
-          else
-            echo "Warning: Using fallback vmlinux.h"
-            wget -q https://raw.githubusercontent.com/libbpf/libbpf/master/include/uapi/linux/bpf.h -O /tmp/vmlinux.h
+          if [ ! -f src/vmlinux.h ] || ! grep -q "struct task_struct" src/vmlinux.h 2>/dev/null; then
+            echo "❌ Error: src/vmlinux.h is missing or invalid!"
+            echo "Please obtain a valid arm64 vmlinux.h and place it in src/vmlinux.h"
+            echo "You can extract it from a rooted device using:"
+            echo "  bpftool btf dump file /sys/kernel/btf/vmlinux format c > src/vmlinux.h"
+            exit 1
           fi
 
           clang -target bpf -O2 -g \
-            -I /tmp \
             -I src \
             -c src/platform/freeze_monitor.bpf.c \
             -o freeze_monitor.bpf.o
@@ -76,9 +70,8 @@ jobs:
           cp /tmp/libbpf-build/libbpf.a  $GITHUB_WORKSPACE/prebuilt/libbpf/
           cp -r /tmp/libbpf/src/*.h       $GITHUB_WORKSPACE/prebuilt/libbpf/include/
           cp -r /tmp/libbpf/src/uapi      $GITHUB_WORKSPACE/prebuilt/libbpf/include/
-          echo "libbpf.a: $(ls -lh $GITHUB_WORKSPACE/prebuilt/libbpf/libbpf.a)"
 
-      # 6. 编译 C++ Daemon
+      # 6. 编译 C++ Daemon (arm64)
       - name: Compile Daemon (arm64)
         run: |
           cmake -B build \
@@ -113,7 +106,8 @@ jobs:
           cd $PKG
           zip -r ../freeze-daemon-${{ github.ref_name }}.zip .
           cd ..
-          echo "Package: \( (ls -lh freeze-daemon- \){{ github.ref_name }}.zip)"
+          # 此处已彻底修复 Bash 命令替换的语法错误
+          echo "Package: $(ls -lh freeze-daemon-${{ github.ref_name }}.zip)"
 
       # 8. 上传 Artifact
       - name: Upload artifact
