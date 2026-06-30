@@ -109,7 +109,7 @@ jobs:
       # 9. 发布 Release（仅当打上 v* tag 时触发）
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-release@v2
+        uses: softprops/action-gh-release@v2
         with:
           files: freeze-daemon-*.zip
         env:
