@@ -1,0 +1,7 @@
+# 用户应用白名单（豁免冻结）
+# 一行一个包名，# 开头为注释
+
+# 示例：即时通讯（需要保持后台接收消息）
+# com.tencent.mm
+# com.tencent.mobileqq
+# com.whatsapp

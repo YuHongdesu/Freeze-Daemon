@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Freeze Daemon</title>
+<style>
+  :root {
+    --bg:           #f2f4f7;
+    --card:         #ffffff;
+    --card2:        #f7f8fa;
+    --text:         #1a1d23;
+    --text2:        #6b7280;
+    --text3:        #9ca3af;
+    --accent:       #2563eb;
+    --accent-light: #eff6ff;
+    --accent-mid:   #bfdbfe;
+    --danger:       #ef4444;
+    --success:      #10b981;
+    --success-light:#ecfdf5;
+    --warn:         #f59e0b;
+    --warn-light:   #fffbeb;
+    --border:       #e5e7eb;
+    --border2:      #d1d5db;
+    --frozen-bg:    #eff6ff;
+    --frozen-text:  #1d4ed8;
+    --frozen-border:#bfdbfe;
+    --radius:       14px;
+    --radius-sm:    8px;
+    --shadow:       0 1px 3px rgba(0,0,0,.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:           #0f1117;
+      --card:         #1c1f26;
+      --card2:        #242730;
+      --text:         #f0f2f5;
+      --text2:        #9ba3af;
+      --text3:        #6b7280;
+      --accent:       #3b82f6;
+      --accent-light: #1e2d4a;
+      --accent-mid:   #1e3a5f;
+      --danger:       #f87171;
+      --success:      #34d399;
+      --success-light:#0f2d20;
+      --warn:         #fbbf24;
+      --warn-light:   #2d1f00;
+      --border:       #2e3138;
+      --border2:      #3d424d;
+      --frozen-bg:    #1a2540;
+      --frozen-text:  #93c5fd;
+      --frozen-border:#1e3a5f;
+    }
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,'PingFang SC','Noto Sans SC',sans-serif;background:var(--bg);color:var(--text);font-size:15px;line-height:1.5;min-height:100vh}
+
+  /* Header */
+  .header{background:var(--card);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:100}
+  .header-inner{display:flex;align-items:center;height:56px;padding:0 16px;gap:12px;max-width:600px;margin:0 auto}
+  .header-title{font-size:18px;font-weight:700;flex:1}
+  .daemon-status{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)}
+  .status-dot{width:7px;height:7px;border-radius:50%;background:var(--text3)}
+  .status-dot.on{background:var(--success)}
+  .status-dot.off{background:var(--danger)}
+
+  /* Reboot banner */
+  .reboot-banner{background:var(--warn-light);color:var(--warn);border-bottom:1px solid rgba(245,158,11,.25);padding:8px 16px;font-size:12.5px;text-align:center;font-weight:500}
+
+  /* Tabs */
+  .tabs{background:var(--card);border-bottom:1px solid var(--border);display:flex;overflow-x:auto;max-width:600px;margin:0 auto}
+  .tabs::-webkit-scrollbar{display:none}
+  .tab{flex:1;min-width:70px;padding:12px 8px 10px;text-align:center;font-size:13px;font-weight:500;color:var(--text2);cursor:pointer;border:none;border-bottom:2px solid transparent;background:none;transition:color .15s,border-color .15s;white-space:nowrap}
+  .tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+
+  /* Content */
+  .pane{max-width:600px;margin:0 auto;padding:16px;display:none}
+  .pane.active{display:block}
+
+  /* Info bar */
+  .infobar{padding:10px 14px;border-radius:var(--radius-sm);font-size:13px;margin-bottom:14px;line-height:1.5}
+  .infobar.blue{background:var(--accent-light);color:var(--accent);border:1px solid var(--accent-mid)}
+  .infobar.yellow{background:var(--warn-light);color:var(--warn);border:1px solid rgba(245,158,11,.25)}
+
+  /* Stat grid */
+  .stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}
+  .stat-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px}
+  .stat-val{font-size:28px;font-weight:700;color:var(--text);line-height:1}
+  .stat-val.blue{color:var(--accent)}
+  .stat-lbl{font-size:12px;color:var(--text2);margin-top:4px}
+
+  /* Section label */
+  .sec-label{font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px;padding-left:2px}
+
+  /* Live indicator */
+  .live-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+  .live-badge{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--success);font-weight:500}
+  .pulse{width:8px;height:8px;border-radius:50%;background:var(--success);animation:pulse 1.5s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.85)}}
+
+  /* App card + items */
+  .app-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:16px}
+  .app-item{display:flex;align-items:center;padding:12px 14px;gap:12px;border-bottom:1px solid var(--border)}
+  .app-item:last-child{border-bottom:none}
+  .app-avatar{width:44px;height:44px;border-radius:10px;flex-shrink:0;background:var(--accent-light);display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:var(--accent)}
+  .app-info{flex:1;min-width:0}
+  .app-name{font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .app-pkg{font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+  .app-meta{font-size:12px;color:var(--text2);margin-top:2px}
+  .app-right{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0}
+
+  /* Badge */
+  .badge{display:inline-flex;align-items:center;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:600}
+  .badge-frozen{background:var(--frozen-bg);color:var(--frozen-text);border:1px solid var(--frozen-border)}
+  .badge-limited{background:var(--warn-light);color:var(--warn);border:1px solid rgba(245,158,11,.2)}
+
+  /* Toggle */
+  .toggle{width:44px;height:26px;border-radius:13px;background:var(--border2);position:relative;cursor:pointer;border:none;padding:0;flex-shrink:0;transition:background .2s}
+  .toggle::after{content:'';position:absolute;width:20px;height:20px;border-radius:50%;background:#fff;top:3px;left:3px;transition:transform .2s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+  .toggle.on{background:var(--accent)}
+  .toggle.on::after{transform:translateX(18px)}
+
+  /* Search */
+  .search-wrap{position:relative;margin-bottom:14px}
+  .search-icon{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--text3);width:16px;height:16px;pointer-events:none}
+  .search-input{width:100%;padding:10px 12px 10px 38px;background:var(--card);border:1px solid var(--border);border-radius:10px;font-size:14px;color:var(--text);outline:none;transition:border-color .15s}
+  .search-input:focus{border-color:var(--accent)}
+  .search-input::placeholder{color:var(--text3)}
+
+  /* Config */
+  .cfg-section{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:16px}
+  .cfg-title{font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.6px;padding:12px 14px 8px;border-bottom:1px solid var(--border)}
+  .cfg-row{display:flex;align-items:center;padding:14px;gap:12px;border-bottom:1px solid var(--border)}
+  .cfg-row:last-child{border-bottom:none}
+  .cfg-lbl{flex:1}
+  .cfg-lbl-title{font-size:14px;font-weight:500}
+  .cfg-lbl-desc{font-size:12px;color:var(--text2);margin-top:2px}
+  .cfg-input{width:90px;padding:7px 10px;background:var(--card2);border:1px solid var(--border2);border-radius:var(--radius-sm);font-size:14px;color:var(--text);text-align:right;outline:none;transition:border-color .15s}
+  .cfg-input:focus{border-color:var(--accent)}
+  .cfg-unit{font-size:12px;color:var(--text2);width:30px}
+
+  /* Buttons */
+  .btn-row{display:flex;gap:10px;margin-top:16px}
+  .btn{flex:1;padding:12px;border-radius:var(--radius-sm);font-size:14px;font-weight:600;cursor:pointer;border:none;transition:opacity .15s,transform .1s;text-align:center}
+  .btn:active{opacity:.8;transform:scale(.98)}
+  .btn-primary{background:var(--accent);color:#fff}
+  .btn-ghost{background:var(--card2);color:var(--text2);border:1px solid var(--border2)}
+
+  /* Toast */
+  .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(80px);background:var(--text);color:var(--card);padding:10px 20px;border-radius:24px;font-size:13px;font-weight:500;z-index:999;pointer-events:none;transition:transform .25s cubic-bezier(.34,1.56,.64,1),opacity .25s;opacity:0;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,.2)}
+  .toast.show{transform:translateX(-50%) translateY(0);opacity:1}
+
+  /* Empty / Loading */
+  .empty{padding:40px 20px;text-align:center;color:var(--text3);font-size:14px}
+  .empty-icon{font-size:36px;margin-bottom:10px}
+  .loading{display:flex;align-items:center;justify-content:center;gap:6px;padding:24px;color:var(--text2);font-size:13px}
+  .spinner{width:16px;height:16px;border:2px solid var(--border2);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-inner">
+    <div class="header-title">❄️ Freeze Daemon</div>
+    <div class="daemon-status">
+      <div class="status-dot" id="dot"></div>
+      <span id="dot-label">检查中...</span>
+    </div>
+  </div>
+  <div class="tabs" id="tabs">
+    <button class="tab active" data-tab="status">实时状态</button>
+    <button class="tab" data-tab="user">用户应用</button>
+    <button class="tab" data-tab="system">系统应用</button>
+    <button class="tab" data-tab="config">参数配置</button>
+  </div>
+</div>
+
+<!-- 持久化重启提示横幅：黑名单变更后常驻显示，不像 toast 会消失，
+     刷新页面或重新打开 Web UI 仍能看到，直到用户实际重启设备 -->
+<div class="reboot-banner" id="rebootBanner" style="display:none">
+  ⚠️ 系统应用黑名单已变更，需要重启设备才能生效
+</div>
+
+<!-- ══ 实时状态 ══ -->
+<div class="pane active" id="pane-status">
+  <div class="live-header">
+    <div class="sec-label" style="margin:0">冻结概览</div>
+    <div class="live-badge"><div class="pulse"></div>实时刷新中</div>
+  </div>
+  <div class="stat-grid">
+    <div class="stat-card"><div class="stat-val blue" id="s-frozen">—</div><div class="stat-lbl">已冻结进程</div></div>
+    <div class="stat-card"><div class="stat-val" id="s-running">—</div><div class="stat-lbl">运行中进程</div></div>
+    <div class="stat-card"><div class="stat-val" id="s-ufrozen">—</div><div class="stat-lbl">用户应用冻结</div></div>
+    <div class="stat-card"><div class="stat-val" id="s-slimited">—</div><div class="stat-lbl">系统应用限制</div></div>
+  </div>
+  <div class="sec-label">冻结中的应用</div>
+  <div class="app-card" id="live-list"><div class="loading"><div class="spinner"></div>加载中...</div></div>
+</div>
+
+<!-- ══ 用户应用 ══ -->
+<div class="pane" id="pane-user">
+  <div class="infobar blue">默认冻结所有用户应用。加入<strong>白名单</strong>的应用不受冻结（如需保持后台的通讯 App）。</div>
+  <div class="search-wrap">
+    <svg class="search-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z"/></svg>
+    <input class="search-input" type="search" placeholder="搜索应用名或包名" id="user-search" oninput="filterUser()">
+  </div>
+  <div class="sec-label">所有用户应用（开关=加入白名单）</div>
+  <div class="app-card" id="user-list"><div class="loading"><div class="spinner"></div>加载中...</div></div>
+</div>
+
+<!-- ══ 系统应用 ══ -->
+<div class="pane" id="pane-system">
+  <div class="infobar yellow">默认不限制系统应用。加入<strong>黑名单</strong>的应用将被踢出 Doze 白名单并剥夺后台权限。</div>
+  <div class="search-wrap">
+    <svg class="search-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z"/></svg>
+    <input class="search-input" type="search" placeholder="搜索应用名或包名" id="sys-search" oninput="filterSys()">
+  </div>
+  <div class="sec-label">所有系统应用（开关=加入黑名单）</div>
+  <div class="app-card" id="sys-list"><div class="loading"><div class="spinner"></div>加载中...</div></div>
+</div>
+
+<!-- ══ 参数配置 ══ -->
+<div class="pane" id="pane-config">
+  <div class="cfg-section">
+    <div class="cfg-title">冻结时机</div>
+    <div class="cfg-row">
+      <div class="cfg-lbl"><div class="cfg-lbl-title">后台冻结延迟</div><div class="cfg-lbl-desc">应用切后台后等待多久再冻结</div></div>
+      <input class="cfg-input" type="number" id="c-bg-delay" min="1" max="60" value="5">
+      <div class="cfg-unit">秒</div>
+    </div>
+    <div class="cfg-row">
+      <div class="cfg-lbl"><div class="cfg-lbl-title">息屏冻结延迟</div><div class="cfg-lbl-desc">屏幕关闭后等待多久统一冻结</div></div>
+      <input class="cfg-input" type="number" id="c-screen-delay" min="1" max="30" value="3">
+      <div class="cfg-unit">秒</div>
+    </div>
+  </div>
+  <div class="cfg-section">
+    <div class="cfg-title">内存压缩</div>
+    <div class="cfg-row">
+      <div class="cfg-lbl"><div class="cfg-lbl-title">内存压缩（Compaction）</div><div class="cfg-lbl-desc">压缩冻结进程内存占用</div></div>
+      <button class="toggle on" id="c-compaction" onclick="this.classList.toggle('on')"></button>
+    </div>
+  </div>
+  <div class="cfg-section">
+    <div class="cfg-title">深度休眠（Deep Sleep）</div>
+    <div class="cfg-row">
+      <div class="cfg-lbl"><div class="cfg-lbl-title">启用深度休眠</div><div class="cfg-lbl-desc">息屏一段时间后强制进入 Deep Doze，并关闭 Wi-Fi/BT 扫描</div></div>
+      <button class="toggle" id="c-deep-sleep" onclick="this.classList.toggle('on')"></button>
+    </div>
+    <div class="cfg-row">
+      <div class="cfg-lbl"><div class="cfg-lbl-title">深度休眠延迟</div><div class="cfg-lbl-desc">普通冻结完成后额外等待多久进入深度休眠</div></div>
+      <input class="cfg-input" type="number" id="c-deep-sleep-delay" min="10" max="300" value="30">
+      <div class="cfg-unit">秒</div>
+    </div>
+  </div>
+  <div class="cfg-section">
+    <div class="cfg-title">用户应用 AppOp 限制</div>
+    <div class="cfg-row">
+      <div class="cfg-lbl"><div class="cfg-lbl-title">剥夺非白名单用户 App 后台权限</div><div class="cfg-lbl-desc">对白名单以外的用户应用撤销 WakeLock、后台运行、开机自启等权限</div></div>
+      <button class="toggle on" id="c-user-appop" onclick="this.classList.toggle('on')"></button>
+    </div>
+  </div>
+  <div class="btn-row">
+    <button class="btn btn-ghost" onclick="resetConfig()">恢复默认</button>
+    <button class="btn btn-primary" onclick="saveConfig()">保存配置</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ══════════════════════════════════════════════════════
+// State
+// ══════════════════════════════════════════════════════
+let liveTimer    = null;
+let allUserApps  = [];
+let allSysApps   = [];
+let userWhitelist = new Set();
+let sysBlacklist  = new Set();
+
+const DEFAULTS = {
+  bg_delay: 5, screen_off_delay: 3,
+  compaction: true, wifi_scan: false,
+  deep_sleep: false, deep_sleep_delay: 30,
+  user_appop_restrict: true,
+};
+
+// ══════════════════════════════════════════════════════
+// Tab routing
+// ══════════════════════════════════════════════════════
+document.getElementById('tabs').addEventListener('click', e => {
+  const btn = e.target.closest('.tab');
+  if (!btn) return;
+  const tab = btn.dataset.tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.pane').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('pane-' + tab).classList.add('active');
+
+  if (tab === 'status') startLive(); else stopLive();
+  if (tab === 'user'   && !allUserApps.length) loadUserApps();
+  if (tab === 'system' && !allSysApps.length)  loadSysApps();
+  if (tab === 'config') loadConfig();
+});
+
+// ══════════════════════════════════════════════════════
+// Daemon status (checked every 10s)
+// ══════════════════════════════════════════════════════
+async function checkDaemon() {
+  try {
+    const r = await fetch('/api/status', { signal: AbortSignal.timeout(2000) });
+    const d = await r.json();
+    setDot(d.running);
+    setRebootBanner(!!d.needs_reboot);
+  } catch { setDot(false); }
+}
+function setDot(on) {
+  document.getElementById('dot').className = 'status-dot ' + (on ? 'on' : 'off');
+  document.getElementById('dot-label').textContent = on ? 'Daemon 运行中' : 'Daemon 未运行';
+}
+function setRebootBanner(show) {
+  document.getElementById('rebootBanner').style.display = show ? 'block' : 'none';
+}
+checkDaemon();
+setInterval(checkDaemon, 10000);
+
+// ══════════════════════════════════════════════════════
+// Live status
+// ══════════════════════════════════════════════════════
+function startLive() { fetchLive(); liveTimer = setInterval(fetchLive, 3000); }
+function stopLive()  { clearInterval(liveTimer); liveTimer = null; }
+
+async function fetchLive() {
+  try {
+    const d = await (await fetch('/api/live')).json();
+    renderLive(d);
+  } catch { renderLiveErr(); }
+}
+
+function renderLive(d) {
+  document.getElementById('s-frozen').textContent  = d.total_frozen  ?? '—';
+  document.getElementById('s-running').textContent = d.total_running ?? '—';
+  document.getElementById('s-ufrozen').textContent  = d.user_frozen   ?? '—';
+  document.getElementById('s-slimited').textContent = d.sys_limited   ?? '—';
+
+  const el = document.getElementById('live-list');
+  if (!d.apps?.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">✨</div>暂无冻结中的应用</div>';
+    return;
+  }
+  el.innerHTML = d.apps.map(a => `
+    <div class="app-item">
+      <div class="app-avatar">${esc(a.name||a.pkg)[0].toUpperCase()}</div>
+      <div class="app-info">
+        <div class="app-name">${esc(a.name||a.pkg)}</div>
+        <div class="app-pkg">${esc(a.pkg)}</div>
+        <div class="app-meta">${a.procs} 个进程 · ${a.mem}</div>
+      </div>
+      <div class="app-right"><span class="badge badge-frozen">V2 冻结中</span></div>
+    </div>`).join('');
+}
+function renderLiveErr() {
+  document.getElementById('live-list').innerHTML =
+    '<div class="empty"><div class="empty-icon">⚠️</div>无法连接 Daemon</div>';
+}
+
+// ══════════════════════════════════════════════════════
+// User apps
+// ══════════════════════════════════════════════════════
+async function loadUserApps() {
+  try {
+    const [ar, wr] = await Promise.all([fetch('/api/apps/user'), fetch('/api/whitelist')]);
+    allUserApps  = await ar.json();
+    userWhitelist = new Set((await wr.json()).list || []);
+    renderUserList(allUserApps);
+  } catch {
+    document.getElementById('user-list').innerHTML =
+      '<div class="empty"><div class="empty-icon">⚠️</div>加载失败</div>';
+  }
+}
+
+function renderUserList(apps) {
+  const el = document.getElementById('user-list');
+  if (!apps.length) { el.innerHTML = '<div class="empty"><div class="empty-icon">📱</div>没有用户应用</div>'; return; }
+  const sorted = [...apps].sort((a,b) => {
+    const aw = userWhitelist.has(a.pkg) ? 0 : 1;
+    const bw = userWhitelist.has(b.pkg) ? 0 : 1;
+    return aw !== bw ? aw - bw : (a.name||a.pkg).localeCompare(b.name||b.pkg, 'zh');
+  });
+  el.innerHTML = sorted.map(a => {
+    const exempt = userWhitelist.has(a.pkg);
+    return `<div class="app-item">
+      <div class="app-avatar">${esc(a.name||a.pkg)[0].toUpperCase()}</div>
+      <div class="app-info">
+        <div class="app-name">${esc(a.name||a.pkg)}</div>
+        <div class="app-pkg">${esc(a.pkg)}</div>
+        <div class="app-meta" style="color:${exempt?'var(--success)':'var(--text2)'}">
+          ${exempt ? '✓ 白名单（不冻结）' : '冻结管理中'}</div>
+      </div>
+      <div class="app-right">
+        <button class="toggle ${exempt?'on':''}"
+          onclick="toggleWhitelist('${esc(a.pkg)}',this)"></button>
+      </div></div>`;
+  }).join('');
+}
+
+async function toggleWhitelist(pkg, btn) {
+  const add = !btn.classList.contains('on');
+  const url  = add ? '/api/whitelist/add' : '/api/whitelist/remove';
+  try {
+    const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({pkg}) });
+    if (!r.ok) throw 0;
+    btn.classList.toggle('on');
+    add ? userWhitelist.add(pkg) : userWhitelist.delete(pkg);
+    toast(add ? `已加入白名单：${pkg}` : `已移出白名单：${pkg}`);
+    renderUserList(filteredUserApps());
+  } catch { toast('操作失败，请重试'); }
+}
+
+function filterUser() { renderUserList(filteredUserApps()); }
+function filteredUserApps() {
+  const q = document.getElementById('user-search').value.toLowerCase();
+  return q ? allUserApps.filter(a => (a.name||'').toLowerCase().includes(q) || a.pkg.toLowerCase().includes(q)) : allUserApps;
+}
+
+// ══════════════════════════════════════════════════════
+// System apps
+// ══════════════════════════════════════════════════════
+async function loadSysApps() {
+  try {
+    const [ar, br] = await Promise.all([fetch('/api/apps/system'), fetch('/api/blacklist')]);
+    allSysApps   = await ar.json();
+    sysBlacklist  = new Set((await br.json()).list || []);
+    renderSysList(allSysApps);
+  } catch {
+    document.getElementById('sys-list').innerHTML =
+      '<div class="empty"><div class="empty-icon">⚠️</div>加载失败</div>';
+  }
+}
+
+function renderSysList(apps) {
+  const el = document.getElementById('sys-list');
+  if (!apps.length) { el.innerHTML = '<div class="empty"><div class="empty-icon">🔧</div>没有系统应用</div>'; return; }
+  const sorted = [...apps].sort((a,b) => {
+    const ab = sysBlacklist.has(a.pkg) ? 0 : 1;
+    const bb = sysBlacklist.has(b.pkg) ? 0 : 1;
+    return ab !== bb ? ab - bb : (a.name||a.pkg).localeCompare(b.name||b.pkg, 'zh');
+  });
+  el.innerHTML = sorted.map(a => {
+    const limited = sysBlacklist.has(a.pkg);
+    return `<div class="app-item">
+      <div class="app-avatar">${esc(a.name||a.pkg)[0].toUpperCase()}</div>
+      <div class="app-info">
+        <div class="app-name">${esc(a.name||a.pkg)}</div>
+        <div class="app-pkg">${esc(a.pkg)}</div>
+        <div class="app-meta" style="color:${limited?'var(--warn)':'var(--text2)'}">
+          ${limited ? '⚡ 已限制（黑名单）' : '未限制'}</div>
+      </div>
+      <div class="app-right">
+        <button class="toggle ${limited?'on':''}"
+          onclick="toggleBlacklist('${esc(a.pkg)}',this)"></button>
+      </div></div>`;
+  }).join('');
+}
+
+async function toggleBlacklist(pkg, btn) {
+  const add = !btn.classList.contains('on');
+  const url  = add ? '/api/blacklist/add' : '/api/blacklist/remove';
+  try {
+    const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({pkg}) });
+    if (!r.ok) throw 0;
+    btn.classList.toggle('on');
+    add ? sysBlacklist.add(pkg) : sysBlacklist.delete(pkg);
+    toast(add ? `已加入黑名单：${pkg}` : `已移出黑名单：${pkg}`);
+    renderSysList(filteredSysApps());
+    checkDaemon();  // 立即刷新重启提示横幅，不等 10 秒轮询
+  } catch { toast('操作失败，请重试'); }
+}
+
+function filterSys() { renderSysList(filteredSysApps()); }
+function filteredSysApps() {
+  const q = document.getElementById('sys-search').value.toLowerCase();
+  return q ? allSysApps.filter(a => (a.name||'').toLowerCase().includes(q) || a.pkg.toLowerCase().includes(q)) : allSysApps;
+}
+
+// ══════════════════════════════════════════════════════
+// Config
+// ══════════════════════════════════════════════════════
+async function loadConfig() {
+  try {
+    const cfg = await (await fetch('/api/config')).json();
+    applyToUI(cfg);
+  } catch { applyToUI(DEFAULTS); }
+}
+
+function applyToUI(c) {
+  document.getElementById('c-bg-delay').value    = c.bg_delay       ?? DEFAULTS.bg_delay;
+  document.getElementById('c-screen-delay').value= c.screen_off_delay ?? DEFAULTS.screen_off_delay;
+  document.getElementById('c-deep-sleep-delay').value = c.deep_sleep_delay ?? DEFAULTS.deep_sleep_delay;
+  setToggle('c-compaction',  c.compaction     ?? DEFAULTS.compaction);
+  setToggle('c-wifi-scan',   c.wifi_scan      ?? DEFAULTS.wifi_scan);
+  setToggle('c-deep-sleep',  c.deep_sleep     ?? DEFAULTS.deep_sleep);
+  setToggle('c-user-appop',  c.user_appop_restrict ?? DEFAULTS.user_appop_restrict);
+}
+
+function setToggle(id, on) {
+  document.getElementById(id).classList.toggle('on', !!on);
+}
+
+async function saveConfig() {
+  const body = {
+    bg_delay:            parseInt(document.getElementById('c-bg-delay').value)          || 5,
+    screen_off_delay:    parseInt(document.getElementById('c-screen-delay').value)      || 3,
+    deep_sleep_delay:    parseInt(document.getElementById('c-deep-sleep-delay').value)  || 30,
+    compaction:          document.getElementById('c-compaction').classList.contains('on'),
+    wifi_scan:           document.getElementById('c-wifi-scan').classList.contains('on'),
+    deep_sleep:          document.getElementById('c-deep-sleep').classList.contains('on'),
+    user_appop_restrict: document.getElementById('c-user-appop').classList.contains('on'),
+  };
+  try {
+    const r = await fetch('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    toast(r.ok ? '✓ 配置已保存，立即生效' : '保存失败，请重试');
+  } catch { toast('保存失败，请重试'); }
+}
+
+function resetConfig() { applyToUI(DEFAULTS); toast('已恢复默认（未保存）'); }
+
+// ══════════════════════════════════════════════════════
+// Toast
+// ══════════════════════════════════════════════════════
+let toastTimer;
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
+}
+
+// ══════════════════════════════════════════════════════
+// Utils
+// ══════════════════════════════════════════════════════
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// Init: live tab is active on load
+startLive();
+</script>
+</body>
+</html>

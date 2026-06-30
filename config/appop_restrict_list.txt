@@ -1,0 +1,10 @@
+# AppOp 剥夺权限列表（唯一数据源）
+# service.sh 直接读取此文件遍历剥夺
+# appop_manager.h 的 RESTRICT_OPS 数组必须与此文件保持一致
+# 修改权限列表时，两处都需要同步更新
+RUN_IN_BACKGROUND
+RUN_ANY_IN_BACKGROUND
+WAKE_LOCK
+REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+RECEIVE_BOOT_COMPLETED
+CHANGE_APP_IDLE_STATE

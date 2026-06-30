@@ -1,0 +1,7 @@
+# 系统应用黑名单（踢出 Doze 白名单 + 剥夺 AppOp）
+# 一行一个包名，# 开头为注释
+
+# Google 全家桶（按需取消注释）
+# com.google.android.googlequicksearchbox
+# com.google.android.youtube
+# com.google.android.gms.persistent 不建议添加 gms 核心
