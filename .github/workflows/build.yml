@@ -23,13 +23,14 @@ jobs:
           echo "y" | sdkmanager "ndk;27.2.12479018"
           echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> $GITHUB_ENV
 
-      - name: Install host toolchain
+      - name: Install host tools
         run: |
           sudo apt-get update -q
           sudo apt-get install -y \
             clang llvm \
             libelf-dev zlib1g-dev \
             libbpf-dev \
+            python3 \
             linux-headers-$(uname -r)
 
       - name: Compile eBPF program
@@ -42,10 +43,13 @@ jobs:
             -o freeze_monitor.bpf.o
           ls -lh freeze_monitor.bpf.o
 
-      - name: Build libbpf for Android from source
+      - name: Build libbpf for Android (no git)
         run: |
-          git clone --depth=1 https://github.com/NickCao/libbpf-android.git /tmp/libbpf-android
-          cd /tmp/libbpf-android
+          # 下载 libbpf-android 源码 zip
+          curl -L -o /tmp/libbpf-android.zip \
+            https://github.com/NickCao/libbpf-android/archive/refs/heads/master.zip
+          unzip -q /tmp/libbpf-android.zip -d /tmp
+          cd /tmp/libbpf-android-master
           export NDK=$NDK_HOME
           ./build.sh
           mkdir -p $GITHUB_WORKSPACE/prebuilt/libbpf/{lib,include/bpf}
@@ -54,9 +58,10 @@ jobs:
           echo "=== libbpf tree ==="
           ls -R $GITHUB_WORKSPACE/prebuilt/libbpf
 
-      - name: Verify libbpf installation
+      - name: Verify libbpf
         run: |
-          if [ ! -f "$GITHUB_WORKSPACE/prebuilt/libbpf/lib/libbpf.a" ] || [ ! -f "$GITHUB_WORKSPACE/prebuilt/libbpf/include/bpf/libbpf.h" ]; then
+          if [ ! -f "$GITHUB_WORKSPACE/prebuilt/libbpf/lib/libbpf.a" ] || \
+             [ ! -f "$GITHUB_WORKSPACE/prebuilt/libbpf/include/bpf/libbpf.h" ]; then
             echo "libbpf build failed"
             exit 1
           fi
