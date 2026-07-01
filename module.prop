@@ -5,3 +5,4 @@ versionCode=1
 author=freeze-daemon
 description=Auto app freezer with eBPF event-driven engine. User apps frozen by default (whitelist to exempt). System apps untouched by default (blacklist to restrict).
 minKernelSU=11143
+webui=true
