@@ -23,7 +23,7 @@ jobs:
           echo "y" | sdkmanager "ndk;27.2.12479018"
           echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> $GITHUB_ENV
 
-      - name: Install host toolchain and arm64 libraries
+      - name: Install host toolchain
         run: |
           sudo apt-get update -q
           sudo apt-get install -y \
@@ -31,10 +31,17 @@ jobs:
             libelf-dev zlib1g-dev \
             libbpf-dev \
             linux-headers-$(uname -r)
-          # 为交叉编译 libbpf 安装 arm64 版本的 libelf 和 zlib
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update -q
-          sudo apt-get install -y libelf-dev:arm64 zlib1g-dev:arm64
+
+      - name: Download arm64 libraries for libbpf
+        run: |
+          # 临时配置只包含 arm64 主源，避免 security 等仓库缺失 arm64 导致失败
+          echo "deb [arch=arm64] http://archive.ubuntu.com/ubuntu noble main" | sudo tee /etc/apt/sources.list.d/arm64.list
+          sudo apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/arm64.list -o Dir::Etc::sourceparts="" -o APT::Get::List-Cleanup=0
+          # 下载 libelf-dev 和 zlib1g-dev 的 arm64 版本
+          cd /tmp
+          apt-get download libelf-dev:arm64 zlib1g-dev:arm64
+          mkdir -p /tmp/arm64-root
+          for deb in *.deb; do dpkg-deb -x "$deb" /tmp/arm64-root; done
 
       - name: Compile eBPF program
         run: |
@@ -52,13 +59,16 @@ jobs:
           TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           SYSROOT=$TOOLCHAIN/sysroot
           CC=$TOOLCHAIN/bin/aarch64-linux-android33-clang
+          ARM64_ROOT=/tmp/arm64-root
 
           git clone --depth=1 --branch v1.4.0 https://github.com/libbpf/libbpf.git /tmp/libbpf
           cd /tmp/libbpf/src
           mkdir -p /tmp/libbpf-build
           make CC="$CC" \
-               CFLAGS="--sysroot=$SYSROOT -target aarch64-linux-android33 -I/usr/include/aarch64-linux-gnu" \
-               LDFLAGS="-L/usr/lib/aarch64-linux-gnu" \
+               CFLAGS="--sysroot=$SYSROOT -target aarch64-linux-android33 \
+                       -I$ARM64_ROOT/usr/include \
+                       -I$ARM64_ROOT/usr/include/aarch64-linux-gnu" \
+               LDFLAGS="-L$ARM64_ROOT/usr/lib/aarch64-linux-gnu" \
                LDLIBS="-l:libelf.a -l:libz.a" \
                OBJDIR=/tmp/libbpf-build \
                BUILD_STATIC_ONLY=1 \
