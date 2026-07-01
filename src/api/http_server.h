@@ -11,12 +11,14 @@
 #include <unistd.h>
 #include <thread>
 #include <atomic>
-#include <algorithm>  // for std::remove_if
+#include <algorithm>
 #include "core/config_store.h"
 #include "core/app_list.h"
 #include "core/app_state.h"
 #include "core/freeze_engine.h"
 #include "util/logger.h"
+#include "util/file_util.h"
+#include "util/constants.h"
 #include "util/reboot_flag.h"
 
 class HttpServer {
@@ -42,15 +44,14 @@ public:
         ::listen(server_fd_, 8);
         running_ = true;
         accept_thread_ = std::thread(&HttpServer::accept_loop, this);
-        LOG_I(TAG, "HTTP API listening on :" + std::to_string(PORT));
+        LOG_I(TAG, "HTTP API + UI listening on http://127.0.0.1:" + std::to_string(PORT));
         return true;
     }
 
     void stop() {
         running_ = false;
-        ::shutdown(server_fd_, SHUT_RDWR);   // 唤醒 accept
+        ::shutdown(server_fd_, SHUT_RDWR);
         if (accept_thread_.joinable()) accept_thread_.join();
-        // 现在 accept 已退出，安全关闭
         ::close(server_fd_);
         server_fd_ = -1;
     }
@@ -66,7 +67,6 @@ private:
         Request req;
         std::istringstream iss(raw);
         iss >> req.method >> req.path;
-        // 去掉查询参数，只保留路径部分
         auto qpos = req.path.find('?');
         if (qpos != std::string::npos) req.path.resize(qpos);
         auto pos = raw.find("\r\n\r\n");
@@ -74,7 +74,19 @@ private:
         return req;
     }
 
+    // 主路由：先检查静态文件，再匹配 API
     std::string handle(const Request& req) {
+        // 静态文件服务（提供 Web UI）
+        if (req.path == "/" || req.path == "/index.html") {
+            return serve_static_file("index.html");
+        }
+        // 其他 webroot 下的资源（js/css/image等）
+        if (req.path.find("/static/") == 0 || req.path.find("/webroot/") == 0) {
+            // 提取文件名，路径约定: /static/style.css 或 /webroot/style.css
+            return serve_static_file(req.path.substr(req.path.find('/', 1) + 1));
+        }
+
+        // 原有 API 路由
         if (req.path == "/api/status")             return handle_status();
         if (req.path == "/api/live")               return handle_live();
         if (req.path == "/api/config" && req.method == "GET")  return handle_config_get();
@@ -88,7 +100,7 @@ private:
         return json_response(404, R"({"error":"not found"})");
     }
 
-    // ── 各接口实现（不变）────────────────────────────────────
+    // ── API 实现（与之前完全一致，省略重复代码，保留关键函数签名）────────
     std::string handle_status() {
         std::ostringstream oss;
         oss << R"({"running":true,"needs_reboot":)"
@@ -190,7 +202,46 @@ private:
                              ok ? R"({"ok":true})" : R"({"error":"failed"})");
     }
 
-    // ── 改进的 JSON 解析（先移除空白字符）─────────────────
+    // ── 静态文件服务 ─────────────────────────────────
+    static constexpr const char* WEBROOT = "/data/adb/modules/freeze-daemon/webroot/";
+
+    std::string serve_static_file(const std::string& filename) {
+        // 防止路径穿越，只允许字母数字、点、下划线、横线
+        for (char c : filename) {
+            if (!isalnum(c) && c != '.' && c != '_' && c != '-') {
+                return json_response(403, R"({"error":"forbidden"})");
+            }
+        }
+
+        std::string full_path = std::string(WEBROOT) + filename;
+        auto content = FileUtil::read_str(full_path);
+        if (!content) {
+            return json_response(404, R"({"error":"not found"})");
+        }
+
+        // 简单 MIME 类型判断
+        std::string mime = "text/html";
+        std::string ext;
+        size_t dot_pos = filename.rfind('.');
+        if (dot_pos != std::string::npos) {
+            ext = filename.substr(dot_pos);
+            if (ext == ".css") mime = "text/css";
+            else if (ext == ".js") mime = "application/javascript";
+            else if (ext == ".svg") mime = "image/svg+xml";
+            else if (ext == ".png") mime = "image/png";
+            else if (ext == ".ico") mime = "image/x-icon";
+        }
+
+        std::ostringstream oss;
+        oss << "HTTP/1.1 200 OK\r\n"
+            << "Content-Type: " << mime << "\r\n"
+            << "Cache-Control: max-age=3600\r\n"
+            << "Content-Length: " << content->size() << "\r\n"
+            << "\r\n" << *content;
+        return oss.str();
+    }
+
+    // ── 极简 JSON 解析（保持不变）─────────────────────
     std::string strip_whitespace(const std::string& s) {
         std::string result;
         result.reserve(s.size());
@@ -234,7 +285,8 @@ private:
         std::string status = (code == 200) ? "200 OK"
                            : (code == 400) ? "400 Bad Request"
                            : (code == 404) ? "404 Not Found"
-                                           : "500 Internal Server Error";
+                           : (code == 403) ? "403 Forbidden"
+                           : "500 Internal Server Error";
         std::ostringstream oss;
         oss << "HTTP/1.1 " << status << "\r\n"
             << "Content-Type: application/json\r\n"
@@ -244,8 +296,8 @@ private:
         return oss.str();
     }
 
-    // ── 线程池：仅使用 1 个 worker，避免并发竞争 ──────────
-    static constexpr int WORKER_COUNT = 1;  // 串行处理即可
+    // ── 线程池（单 worker）────────────────────────────
+    static constexpr int WORKER_COUNT = 1;
 
     void accept_loop() {
         for (int i = 0; i < WORKER_COUNT; ++i) {
@@ -284,7 +336,6 @@ private:
                 fd = client_queue_.front();
                 client_queue_.pop();
             }
-            // 关键：捕获所有异常，防止 worker 意外退出
             try {
                 handle_client(fd);
             } catch (const std::exception& e) {
