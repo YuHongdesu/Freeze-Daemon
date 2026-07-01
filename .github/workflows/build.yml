@@ -32,54 +32,46 @@ jobs:
             libbpf-dev \
             linux-headers-$(uname -r)
 
-      - name: Download arm64 libraries for libbpf
+      - name: Compile eBPF program (host)
         run: |
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main universe" | sudo tee /etc/apt/sources.list.d/arm64-ports.list
-          sudo apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/arm64-ports.list -o Dir::Etc::sourceparts="" -o APT::Get::List-Cleanup=0
-          cd /tmp
-          apt-get download libelf-dev:arm64 zlib1g-dev:arm64
-          mkdir -p /tmp/arm64-root
-          for deb in *.deb; do dpkg-deb -x "$deb" /tmp/arm64-root; done
+          clang -target bpf -O2 -g -mcpu=v2 \
+            -D__TARGET_ARCH_arm64 \
+            -I src \
+            -I /usr/include \
+            -c src/platform/freeze_monitor.bpf.c \
+            -o freeze_monitor.bpf.o
+          ls -lh freeze_monitor.bpf.o
 
-      - name: Cross-compile libbpf for arm64
+      - name: Download prebuilt libbpf for Android arm64
         run: |
-          NDK=$NDK_HOME
-          TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-          SYSROOT=$TOOLCHAIN/sysroot
-          CC=$TOOLCHAIN/bin/aarch64-linux-android33-clang
-          ARM64_ROOT=/tmp/arm64-root
-
-          git clone --depth=1 --branch v1.4.0 https://github.com/libbpf/libbpf.git /tmp/libbpf
-          cd /tmp/libbpf/src
-          mkdir -p /tmp/libbpf-build
-          make CC="$CC" \
-               CFLAGS="--sysroot=$SYSROOT -target aarch64-linux-android33 \
-                       -I$ARM64_ROOT/usr/include \
-                       -I$ARM64_ROOT/usr/include/aarch64-linux-gnu \
-                       -D__poll_t=unsigned" \
-               LDFLAGS="-L$ARM64_ROOT/usr/lib/aarch64-linux-gnu" \
-               LDLIBS="-l:libelf.a -l:libz.a" \
-               OBJDIR=/tmp/libbpf-build \
-               BUILD_STATIC_ONLY=1 \
-               -j$(nproc)
-
-          INSTALL_DIR=$GITHUB_WORKSPACE/prebuilt/libbpf
-          mkdir -p $INSTALL_DIR/lib $INSTALL_DIR/include/bpf
-          cp -v /tmp/libbpf-build/libbpf.a  $INSTALL_DIR/lib/
-          cp -v /tmp/libbpf/src/*.h         $INSTALL_DIR/include/bpf/
-
-          # 同时复制依赖的静态库，供最终链接使用
-          cp -v $ARM64_ROOT/usr/lib/aarch64-linux-gnu/libelf.a $INSTALL_DIR/lib/
-          cp -v $ARM64_ROOT/usr/lib/aarch64-linux-gnu/libz.a   $INSTALL_DIR/lib/
+          LIBBPF_VERSION="1.4.0"
+          LIBBPF_URL="https://github.com/nickdesaulniers/libbpf-android/releases/download/v${LIBBPF_VERSION}/libbpf-android-v${LIBBPF_VERSION}.tar.gz"
+          echo "Downloading libbpf from ${LIBBPF_URL}"
+          # 尝试多次下载，防止网络波动
+          for i in 1 2 3; do
+            curl -L --retry 3 --retry-delay 5 "$LIBBPF_URL" -o /tmp/libbpf.tar.gz && break
+            sleep 5
+          done
+          mkdir -p /tmp/libbpf-prebuilt
+          tar xf /tmp/libbpf.tar.gz -C /tmp/libbpf-prebuilt
+          # 预编译包通常包含 libbpf.a 和 include/ 目录
+          mkdir -p $GITHUB_WORKSPACE/prebuilt/libbpf/{lib,include}
+          cp /tmp/libbpf-prebuilt/libbpf.a $GITHUB_WORKSPACE/prebuilt/libbpf/lib/ 2>/dev/null || \
+          cp /tmp/libbpf-prebuilt/lib/libbpf.a $GITHUB_WORKSPACE/prebuilt/libbpf/lib/
+          cp -r /tmp/libbpf-prebuilt/include/* $GITHUB_WORKSPACE/prebuilt/libbpf/include/ 2>/dev/null || \
+          cp -r /tmp/libbpf-prebuilt/bpf $GITHUB_WORKSPACE/prebuilt/libbpf/include/
+          echo "=== libbpf tree ==="
+          ls -R $GITHUB_WORKSPACE/prebuilt/libbpf
 
       - name: Verify libbpf installation
         run: |
-          echo "=== libbpf installation tree ==="
-          ls -R $GITHUB_WORKSPACE/prebuilt/libbpf
-          echo "=== checking libbpf.a ==="
+          if [ ! -f "$GITHUB_WORKSPACE/prebuilt/libbpf/lib/libbpf.a" ] || [ ! -d "$GITHUB_WORKSPACE/prebuilt/libbpf/include/bpf" ]; then
+            echo "libbpf download failed or structure incorrect"
+            exit 1
+          fi
           file $GITHUB_WORKSPACE/prebuilt/libbpf/lib/libbpf.a
 
-      - name: Compile Freeze Daemon
+      - name: Compile Daemon (arm64)
         run: |
           cmake -B build \
             -DCMAKE_TOOLCHAIN_FILE=$NDK_HOME/build/cmake/android.toolchain.cmake \
@@ -102,7 +94,7 @@ jobs:
           chmod +x $PKG/service.sh
 
           cp build/freeze_daemon          $PKG/bin/
-          cp build/freeze_monitor.bpf.o   $PKG/bin/
+          cp freeze_monitor.bpf.o         $PKG/bin/
           chmod +x $PKG/bin/freeze_daemon
 
           cp config/freeze.conf           $PKG/config/
