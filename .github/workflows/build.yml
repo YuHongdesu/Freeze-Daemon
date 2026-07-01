@@ -35,6 +35,7 @@ jobs:
       - name: Compile eBPF program
         run: |
           clang -target bpf -O2 -g -mcpu=v2 \
+            -D__TARGET_ARCH_arm64 \
             -I src \
             -I /usr/include \
             -c src/platform/freeze_monitor.bpf.c \
