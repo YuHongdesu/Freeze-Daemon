@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <unistd.h>
+#include <atomic>
 #include "util/constants.h"
 #include "util/logger.h"
 #include "util/timer.h"
@@ -23,7 +24,7 @@ constexpr const char* TAG = "Main";
 
 // ── 信号处理 ─────────────────────────────────────────────
 
-static volatile bool g_running = true;
+static std::atomic<bool> g_running{true};
 
 static void on_signal(int /*sig*/) { g_running = false; }
 
@@ -59,7 +60,7 @@ static bool init_bpf(BpfLoader& loader, EventDispatcher& dispatcher) {
         dispatcher.dispatch(ev);
     });
     if (!ok) {
-        LOG_E(TAG, "eBPF load failed, daemon cannot start");
+        LOG_W(TAG, "eBPF load failed, daemon will run without BPF events");
         return false;
     }
     return true;
@@ -75,7 +76,7 @@ static void schedule_top_app_refresh(BpfLoader& loader) {
     constexpr int FALLBACK_TRIGGER_COUNT = 3;
 
     auto refresh_fn = std::make_shared<std::function<void()>>();
-    *refresh_fn = [&loader, refresh_fn]() {  // 不再捕获 REFRESH_INTERVAL_MS
+    *refresh_fn = [&loader, refresh_fn]() {
         bool ok = loader.refresh_top_app_cgroup();
 
         if (!ok && loader.consecutive_fail_count() >= FALLBACK_TRIGGER_COUNT) {
@@ -110,16 +111,18 @@ int main() {
     // 3. 启动定时器线程
     TimerManager::instance().start();
 
-    // 4. 加载 eBPF + 绑定事件回调
+    // 4. 加载 eBPF + 绑定事件回调（失败不退出）
     BpfLoader       bpf_loader;
     EventDispatcher dispatcher;
-    if (!init_bpf(bpf_loader, dispatcher)) return 1;
+    bool bpf_ok = init_bpf(bpf_loader, dispatcher);
 
-    // 4.5 注入 our_frozen_cgroups map 指针
-    FreezeEngine::instance().set_frozen_cgroups_map(bpf_loader.frozen_cgroup_map());
+    if (bpf_ok) {
+        // 注入 our_frozen_cgroups map 指针
+        FreezeEngine::instance().set_frozen_cgroups_map(bpf_loader.frozen_cgroup_map());
 
-    // 4.6 周期刷新 top_app_cgroup_id
-    schedule_top_app_refresh(bpf_loader);
+        // 周期刷新 top_app_cgroup_id
+        schedule_top_app_refresh(bpf_loader);
+    }
 
     // 5. 加载名单 + 刷新 uid 缓存
     init_lists(dispatcher);
@@ -131,15 +134,17 @@ int main() {
     HttpServer http;
     if (!http.start()) return 1;
 
-    // 7. 启动 eBPF 后台事件循环，主线程等待信号
+    // 7. 启动 eBPF 后台事件循环（仅当 BPF 加载成功）
     LOG_I(TAG, "Running. PID=" + std::to_string(getpid()));
-    bpf_loader.start_loop();
+    if (bpf_ok) {
+        bpf_loader.start_loop();
+    }
 
     while (g_running) { pause(); }
 
     // ── 清理 ─────────────────────────────────────────────
     LOG_I(TAG, "Shutting down");
-    bpf_loader.stop();
+    if (bpf_ok) bpf_loader.stop();
     http.stop();
     TimerManager::instance().stop();
     remove_pid_file();
