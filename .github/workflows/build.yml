@@ -34,7 +34,6 @@ jobs:
 
       - name: Download arm64 libraries for libbpf
         run: |
-          # 使用 ports.ubuntu.com 获取 arm64 二进制包
           echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main universe" | sudo tee /etc/apt/sources.list.d/arm64-ports.list
           sudo apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/arm64-ports.list -o Dir::Etc::sourceparts="" -o APT::Get::List-Cleanup=0
           cd /tmp
@@ -66,7 +65,8 @@ jobs:
           make CC="$CC" \
                CFLAGS="--sysroot=$SYSROOT -target aarch64-linux-android33 \
                        -I$ARM64_ROOT/usr/include \
-                       -I$ARM64_ROOT/usr/include/aarch64-linux-gnu" \
+                       -I$ARM64_ROOT/usr/include/aarch64-linux-gnu \
+                       -D__poll_t=unsigned" \
                LDFLAGS="-L$ARM64_ROOT/usr/lib/aarch64-linux-gnu" \
                LDLIBS="-l:libelf.a -l:libz.a" \
                OBJDIR=/tmp/libbpf-build \
