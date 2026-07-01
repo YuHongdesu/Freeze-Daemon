@@ -32,7 +32,7 @@ jobs:
             libbpf-dev \
             linux-headers-$(uname -r)
 
-      - name: Compile eBPF program (host)
+      - name: Compile eBPF program
         run: |
           clang -target bpf -O2 -g -mcpu=v2 \
             -D__TARGET_ARCH_arm64 \
@@ -45,27 +45,29 @@ jobs:
       - name: Download prebuilt libbpf for Android arm64
         run: |
           LIBBPF_VERSION="1.4.0"
-          LIBBPF_URL="https://github.com/nickdesaulniers/libbpf-android/releases/download/v${LIBBPF_VERSION}/libbpf-android-v${LIBBPF_VERSION}.tar.gz"
+          LIBBPF_URL="https://github.com/NickCao/libbpf-android/releases/download/v${LIBBPF_VERSION}/libbpf-android-v${LIBBPF_VERSION}.tar.gz"
           echo "Downloading libbpf from ${LIBBPF_URL}"
-          # 尝试多次下载，防止网络波动
           for i in 1 2 3; do
             curl -L --retry 3 --retry-delay 5 "$LIBBPF_URL" -o /tmp/libbpf.tar.gz && break
             sleep 5
           done
           mkdir -p /tmp/libbpf-prebuilt
           tar xf /tmp/libbpf.tar.gz -C /tmp/libbpf-prebuilt
-          # 预编译包通常包含 libbpf.a 和 include/ 目录
           mkdir -p $GITHUB_WORKSPACE/prebuilt/libbpf/{lib,include}
-          cp /tmp/libbpf-prebuilt/libbpf.a $GITHUB_WORKSPACE/prebuilt/libbpf/lib/ 2>/dev/null || \
-          cp /tmp/libbpf-prebuilt/lib/libbpf.a $GITHUB_WORKSPACE/prebuilt/libbpf/lib/
-          cp -r /tmp/libbpf-prebuilt/include/* $GITHUB_WORKSPACE/prebuilt/libbpf/include/ 2>/dev/null || \
-          cp -r /tmp/libbpf-prebuilt/bpf $GITHUB_WORKSPACE/prebuilt/libbpf/include/
+          # 适配可能的不同目录结构
+          if [ -f /tmp/libbpf-prebuilt/libbpf.a ]; then
+            cp /tmp/libbpf-prebuilt/libbpf.a $GITHUB_WORKSPACE/prebuilt/libbpf/lib/
+            cp -r /tmp/libbpf-prebuilt/include/* $GITHUB_WORKSPACE/prebuilt/libbpf/include/
+          else
+            cp /tmp/libbpf-prebuilt/lib/libbpf.a $GITHUB_WORKSPACE/prebuilt/libbpf/lib/
+            cp -r /tmp/libbpf-prebuilt/include/* $GITHUB_WORKSPACE/prebuilt/libbpf/include/
+          fi
           echo "=== libbpf tree ==="
           ls -R $GITHUB_WORKSPACE/prebuilt/libbpf
 
       - name: Verify libbpf installation
         run: |
-          if [ ! -f "$GITHUB_WORKSPACE/prebuilt/libbpf/lib/libbpf.a" ] || [ ! -d "$GITHUB_WORKSPACE/prebuilt/libbpf/include/bpf" ]; then
+          if [ ! -f "$GITHUB_WORKSPACE/prebuilt/libbpf/lib/libbpf.a" ] || [ ! -f "$GITHUB_WORKSPACE/prebuilt/libbpf/include/bpf/libbpf.h" ]; then
             echo "libbpf download failed or structure incorrect"
             exit 1
           fi
