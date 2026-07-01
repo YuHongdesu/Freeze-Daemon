@@ -4,8 +4,9 @@
 // 针对 Android 16 + 5.15 GKI + 骁龙 8 Gen 2
 //
 // 关键修复：
-// - 使用 BPF_PROG 宏处理 cgroup_migrate tracepoint，
-//   直接获取 src_cgrp/dst_cgrp/task 指针，无需依赖不完整的结构体定义
+// - on_cgroup_migrate 改用 tp_btf，直接获取 tracepoint 参数，
+//   无需依赖不完整的 trace_event_raw 结构体，且兼容内核 5.10+
+// - 参数顺序按内核真实定义：dst_cgrp, src_cgrp, task, threadgroup
 // - 前后台切换通过比较 src/dst cgroup id 与 top-app cgroup id 精确判定
 // - suspend_resume 采用 tp_btf 原始参数，避免 vmlinux.h 中结构体缺失
 // - kprobe/cgroup_freeze 依赖编译选项 __TARGET_ARCH_arm64
@@ -71,13 +72,13 @@ static __always_inline void emit_ev(__u8 type, __u32 uid, __u32 pid) {
     bpf_ringbuf_submit(out, 0);
 }
 
-// ── cgroup_migrate：前后台切换检测 ───────────────────────────
-// 使用 BPF_PROG 宏直接获取 tracepoint 参数指针，
-// 完全规避 vmlinux.h 中 trace_event_raw_xxx 结构体不完整的问题
-SEC("tracepoint/cgroup/cgroup_migrate")
+// ── cgroup_migrate：前后台切换检测 (tp_btf) ─────────────────
+// 使用 BPF_PROG 宏 + SEC("tp_btf/cgroup_migrate")
+// 参数顺序：dst_cgrp, src_cgrp, task, threadgroup
+SEC("tp_btf/cgroup_migrate")
 int BPF_PROG(on_cgroup_migrate,
-    struct cgroup *src_cgrp,
     struct cgroup *dst_cgrp,
+    struct cgroup *src_cgrp,
     struct task_struct *task,
     bool threadgroup)
 {
