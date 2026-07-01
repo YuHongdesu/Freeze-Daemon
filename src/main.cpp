@@ -70,20 +70,10 @@ static void init_lists(EventDispatcher& dispatcher) {
     dispatcher.refresh_uid_cache();
 }
 
-// top-app cgroup id 会随系统重新分配而变化（设备重启 top-app 服务、
-// 系统资源回收等场景），周期刷新避免 sched_switch 探针逐渐失效
-//
-// 同时承担 eBPF 失效时的 shell 兜底职责：借鉴 Frosty get_fg_pkg() 的
-// 双层 dumpsys 查询模式（见 ForegroundFallback），当 eBPF 连续多次
-// 无法读取 top-app cgroup.id 时，主动查询一次当前前台包名并手动
-// 驱动一次 on_app_foreground，确保冻结策略不会因为 eBPF 异常而完全失明
 static void schedule_top_app_refresh(BpfLoader& loader) {
-    constexpr int REFRESH_INTERVAL_MS = 30000;  // 30 秒一次，足够及时且开销极小
-    // eBPF 连续失败超过这个次数（约 1.5 分钟）才触发 shell 兜底，
-    // 避免瞬时抖动就频繁触发额外的 dumpsys 调用
+    constexpr int REFRESH_INTERVAL_MS = 30000;
     constexpr int FALLBACK_TRIGGER_COUNT = 3;
 
-    // 用 shared_ptr 包装自引用闭包，避免局部 lambda 在函数返回后悬空
     auto refresh_fn = std::make_shared<std::function<void()>>();
     *refresh_fn = [&loader, refresh_fn, REFRESH_INTERVAL_MS]() {
         bool ok = loader.refresh_top_app_cgroup();
@@ -109,8 +99,6 @@ int main() {
 
     LOG_I(TAG, "freeze_daemon starting");
 
-    // Daemon 重启意味着 service.sh 也重新执行过了（KernelSU 每次开机都跑），
-    // 之前标记的"待生效"变更（如系统黑名单）现在已经真正生效，清除标记
     RebootFlag::clear_all();
 
     // 1. 加载配置
@@ -127,17 +115,16 @@ int main() {
     EventDispatcher dispatcher;
     if (!init_bpf(bpf_loader, dispatcher)) return 1;
 
-    // 4.5 注入 our_frozen_cgroups map fd，供 FreezeEngine 冻结/解冻时写入
-    FreezeEngine::instance().set_frozen_cgroups_map_fd(bpf_loader.frozen_cgroup_map_fd());
+    // 4.5 注入 our_frozen_cgroups map 指针，供 FreezeEngine 使用
+    FreezeEngine::instance().set_frozen_cgroups_map(bpf_loader.frozen_cgroup_map());
 
-    // 4.6 周期刷新 top_app_cgroup_id（top-app 切换设备时该 cgroup id 会变化，
-    //     不刷新会导致 sched_switch 探针的前后台判断逐渐失效）
+    // 4.6 周期刷新 top_app_cgroup_id
     schedule_top_app_refresh(bpf_loader);
 
     // 5. 加载名单 + 刷新 uid 缓存
     init_lists(dispatcher);
 
-    // 5.5 启动系统 Freezer 防御层（周期检查 device_config 是否被外部重置）
+    // 5.5 启动系统 Freezer 防御层
     FreezeEngine::instance().start_freezer_guard();
 
     // 6. 启动 HTTP API
@@ -148,12 +135,11 @@ int main() {
     LOG_I(TAG, "Running. PID=" + std::to_string(getpid()));
     bpf_loader.start_loop();
 
-    // 阻塞直到 SIGTERM / SIGINT
     while (g_running) { pause(); }
 
     // ── 清理 ─────────────────────────────────────────────
     LOG_I(TAG, "Shutting down");
-    bpf_loader.stop();      // 先停 eBPF（置 running_=false 并 join 线程）
+    bpf_loader.stop();
     http.stop();
     TimerManager::instance().stop();
     remove_pid_file();
