@@ -68,6 +68,10 @@ jobs:
           cp -v /tmp/libbpf-build/libbpf.a  $INSTALL_DIR/lib/
           cp -v /tmp/libbpf/src/*.h         $INSTALL_DIR/include/bpf/
 
+          # 同时复制依赖的静态库，供最终链接使用
+          cp -v $ARM64_ROOT/usr/lib/aarch64-linux-gnu/libelf.a $INSTALL_DIR/lib/
+          cp -v $ARM64_ROOT/usr/lib/aarch64-linux-gnu/libz.a   $INSTALL_DIR/lib/
+
       - name: Verify libbpf installation
         run: |
           echo "=== libbpf installation tree ==="
