@@ -26,11 +26,7 @@ jobs:
       - name: Install host toolchain
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y \
-            clang llvm \
-            libelf-dev zlib1g-dev \
-            libbpf-dev \
-            linux-headers-$(uname -r)
+          sudo apt-get install -y clang llvm libbpf-dev linux-headers-$(uname -r)
 
       - name: Compile eBPF program
         run: |
@@ -42,51 +38,108 @@ jobs:
             -o freeze_monitor.bpf.o
           ls -lh freeze_monitor.bpf.o
 
-      - name: Build libbpf for Android
+      # ────────────────────────────────────────────────────────────────
+      # 为 arm64-v8a 交叉编译 libbpf（含 libelf、zlib）
+      #
+      # 背景：上面 apt 装的 libbpf-dev 是 x86_64 版本，只够编译 eBPF 字节码
+      # （字节码不链接 libc，架构无关）。freeze_daemon 本体交叉编译到
+      # arm64-v8a，链接时需要 arm64 版 libbpf 静态库，而 CMakeLists.txt
+      # 里的 LIBBPF_DIR 检查（第34行）找的正是这份 arm64 产物，原先项目里
+      # 没有任何步骤生成它，所以之前的 CI 会在 cmake 配置阶段直接失败。
+      #
+      # 完整 elfutils 在 bionic (Android NDK) 上无法直接 configure，因为
+      # libdw/命令行工具依赖 argp.h/obstack.h 等 glibc 专属头文件（这也是
+      # AOSP 自己都要维护 bionic-fixup/argp.h 补丁的原因）。这里改用
+      # arachsys/libelf ——一份从 elfutils 单独剥离出的 libelf，用 Makefile
+      # 驱动、无 autotools、不依赖 argp/fts/obstack，仅需 zlib，专门解决
+      # 这类交叉编译场景。
+      #
+      # 若本步骤失败，从下面的 "=== ... ===" 分段标记能看出具体卡在哪一段
+      # （zlib / libelf / libbpf），把对应段的完整日志发回即可定位。
+      # ────────────────────────────────────────────────────────────────
+      - name: Cross-compile libbpf for arm64-v8a
         run: |
-          # 优先使用 git clone，带重试
-          for i in 1 2 3; do
-            git clone --depth=1 https://github.com/NickCao/libbpf-android.git /tmp/libbpf-android && break
-            sleep 5
-          done
-          # 若 git 失败，回退到 curl 下载 zip（带大小检查）
-          if [ ! -d /tmp/libbpf-android ]; then
-            echo "git clone failed, trying zip download"
-            for i in 1 2 3; do
-              curl -L --retry 3 --retry-delay 5 -H "User-Agent: Mozilla/5.0" \
-                -o /tmp/libbpf-android.zip \
-                https://github.com/NickCao/libbpf-android/archive/refs/heads/master.zip
-              if [ -f /tmp/libbpf-android.zip ] && [ $(stat -c%s /tmp/libbpf-android.zip) -gt 1000 ]; then
-                unzip -q /tmp/libbpf-android.zip -d /tmp
-                mv /tmp/libbpf-android-master /tmp/libbpf-android
-                break
-              else
-                rm -f /tmp/libbpf-android.zip
-              fi
-              sleep 5
-            done
-          fi
-          if [ ! -d /tmp/libbpf-android ]; then
-            echo "Failed to obtain libbpf-android"
-            exit 1
-          fi
-          cd /tmp/libbpf-android
-          export NDK=$NDK_HOME
-          ./build.sh
-          mkdir -p $GITHUB_WORKSPACE/prebuilt/libbpf/{lib,include/bpf}
-          cp build/libbpf.a $GITHUB_WORKSPACE/prebuilt/libbpf/lib/
-          cp -r libbpf/src/*.h $GITHUB_WORKSPACE/prebuilt/libbpf/include/bpf/
-          echo "=== libbpf tree ==="
-          ls -R $GITHUB_WORKSPACE/prebuilt/libbpf
+          set -ex
+          NDK=$NDK_HOME
+          API=33
+          TARGET=aarch64-linux-android
+          TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          SYSROOT=$TOOLCHAIN/sysroot
+          PREFIX=$GITHUB_WORKSPACE/prebuilt/libbpf
 
-      - name: Verify libbpf
-        run: |
-          if [ ! -f "$GITHUB_WORKSPACE/prebuilt/libbpf/lib/libbpf.a" ] || \
-             [ ! -f "$GITHUB_WORKSPACE/prebuilt/libbpf/include/bpf/libbpf.h" ]; then
-            echo "libbpf build failed"
-            exit 1
-          fi
-          file $GITHUB_WORKSPACE/prebuilt/libbpf/lib/libbpf.a
+          mkdir -p $PREFIX/lib $PREFIX/include/bpf
+          export CC=$TOOLCHAIN/bin/${TARGET}${API}-clang
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
+          export NM=$TOOLCHAIN/bin/llvm-nm
+          test -x "$CC" || { echo "FATAL: NDK clang not found at $CC"; exit 1; }
+
+          echo "=== [1/3] zlib for arm64 ==="
+          curl -fsSL https://zlib.net/fossils/zlib-1.3.1.tar.gz -o /tmp/zlib.tar.gz
+          mkdir -p /tmp/zlib && tar -xzf /tmp/zlib.tar.gz -C /tmp/zlib --strip-components=1
+          cd /tmp/zlib
+          CHOST=$TARGET CC=$CC AR=$AR RANLIB=$RANLIB \
+            CFLAGS="--sysroot=$SYSROOT -fPIC -O2" \
+            ./configure --static --prefix=$PREFIX
+          make -j$(nproc) libz.a
+          cp libz.a $PREFIX/lib/
+          cp zlib.h zconf.h $PREFIX/include/
+          test -f "$PREFIX/lib/libz.a" || { echo "FATAL: libz.a not produced"; exit 1; }
+          echo "zlib OK: $(ls -la $PREFIX/lib/libz.a)"
+
+          echo "=== [2/3] libelf (arachsys, arm64) ==="
+          curl -fsSL https://codeload.github.com/arachsys/libelf/tar.gz/refs/heads/master \
+            -o /tmp/libelf.tar.gz
+          mkdir -p /tmp/libelf && tar -xzf /tmp/libelf.tar.gz -C /tmp/libelf --strip-components=1
+          cd /tmp/libelf
+          # 关闭 zstd 支持以简化依赖面（我们的 .bpf.o 不使用压缩 ELF 段）；
+          # 若上游 src/config.h 结构有变导致这两行 sed 失效，构建仍会继续，
+          # 只是链接期若报 undefined reference to zstd_* 需要回来看这里
+          sed -i '/USE_ZSTD/d' src/config.h || true
+          CC=$CC AR=$AR RANLIB=$RANLIB \
+            CFLAGS="--sysroot=$SYSROOT -fPIC -O2 -I$PREFIX/include" \
+            LDLIBS="-lz" LDFLAGS="-L$PREFIX/lib" \
+            PREFIX=$PREFIX \
+            make -j$(nproc) install-static install-headers 2>&1 | tee /tmp/libelf-build.log \
+            || { echo "FATAL: libelf make failed, see log above"; exit 1; }
+          test -f "$PREFIX/lib/libelf.a" || { echo "FATAL: libelf.a not produced"; exit 1; }
+          test -f "$PREFIX/include/libelf.h" || { echo "FATAL: libelf.h not installed"; exit 1; }
+          echo "libelf OK: $(ls -la $PREFIX/lib/libelf.a)"
+
+          echo "=== [3/3] libbpf (arm64) ==="
+          curl -fsSL https://github.com/libbpf/libbpf/archive/refs/tags/v1.4.5.tar.gz -o /tmp/libbpf.tar.gz
+          mkdir -p /tmp/libbpf && tar -xzf /tmp/libbpf.tar.gz -C /tmp/libbpf --strip-components=1
+          cd /tmp/libbpf/src
+          mkdir -p /tmp/libbpf-build
+          # NO_PKG_CONFIG=1: 交叉编译环境没有 arm64 目标的 pkg-config，
+          # 改用 EXTRA_CFLAGS/LDLIBS 手动指向上面编好的 zlib/libelf。
+          # BUILD_STATIC_ONLY=y: 只产出 libbpf.a，跳过 .so 相关的版本脚本处理
+          CC=$CC AR=$AR \
+          EXTRA_CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include" \
+          LDLIBS="-lelf -lz" \
+          NO_PKG_CONFIG=1 BUILD_STATIC_ONLY=y \
+          OBJDIR=/tmp/libbpf-build DESTDIR=$PREFIX \
+            make -j$(nproc) install_headers 2>&1 | tee /tmp/libbpf-headers.log \
+            || { echo "FATAL: libbpf install_headers failed, see log above"; exit 1; }
+          CC=$CC AR=$AR \
+          EXTRA_CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include" \
+          LDLIBS="-lelf -lz" \
+          NO_PKG_CONFIG=1 BUILD_STATIC_ONLY=y \
+          OBJDIR=/tmp/libbpf-build DESTDIR=$PREFIX \
+            make -j$(nproc) 2>&1 | tee /tmp/libbpf-build.log \
+            || { echo "FATAL: libbpf make failed, see log above"; exit 1; }
+
+          find /tmp/libbpf-build -name "libbpf.a" -exec cp {} $PREFIX/lib/ \;
+          test -f "$PREFIX/lib/libbpf.a" || { echo "FATAL: libbpf.a not produced"; exit 1; }
+          test -f "$PREFIX/include/bpf/libbpf.h" || { echo "FATAL: libbpf.h not installed to expected path"; exit 1; }
+          echo "libbpf OK: $(ls -la $PREFIX/lib/libbpf.a)"
+
+          echo "=== prebuilt/libbpf final layout ==="
+          find $PREFIX -maxdepth 3 -type f | sort
+
+          echo "=== quick symbol sanity check (arm64 objects expected) ==="
+          $TOOLCHAIN/bin/llvm-readobj -h $PREFIX/lib/libbpf.a 2>/dev/null | grep -m1 "Machine" || \
+            $TOOLCHAIN/bin/llvm-objdump -a $PREFIX/lib/libbpf.a | head -5
 
       - name: Compile Daemon (arm64)
         run: |
@@ -105,21 +158,14 @@ jobs:
           SAFE_REF="${GITHUB_REF_NAME//\//-}"
           PKG=module_package
           mkdir -p $PKG/{bin,config,webui,logs}
-
           cp module.prop                  $PKG/
-          cp scripts/service.sh           $PKG/service.sh
-          chmod +x $PKG/service.sh
-
-          cp build/freeze_daemon          $PKG/bin/
+          cp scripts/service.sh           $PKG/service.sh && chmod +x $PKG/service.sh
+          cp build/freeze_daemon          $PKG/bin/   && chmod +x $PKG/bin/freeze_daemon
           cp freeze_monitor.bpf.o         $PKG/bin/
-          chmod +x $PKG/bin/freeze_daemon
-
           cp config/freeze.conf           $PKG/config/
           cp config/user_whitelist.txt    $PKG/config/
           cp config/system_blacklist.txt  $PKG/config/
-
           cp webui/index.html             $PKG/webui/
-
           cd $PKG
           zip -r ../freeze-daemon-${SAFE_REF}.zip .
           cd ..
