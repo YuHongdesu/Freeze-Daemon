@@ -92,16 +92,44 @@ jobs:
             -o /tmp/libelf.tar.gz
           mkdir -p /tmp/libelf && tar -xzf /tmp/libelf.tar.gz -C /tmp/libelf --strip-components=1
           cd /tmp/libelf
-          # 关闭 zstd 支持以简化依赖面（我们的 .bpf.o 不使用压缩 ELF 段）；
-          # 若上游 src/config.h 结构有变导致这两行 sed 失效，构建仍会继续，
-          # 只是链接期若报 undefined reference to zstd_* 需要回来看这里
+
+          # --- 诊断输出：把它的 Makefile 全文打进日志 -----------------
+          # 上一轮失败是因为我们假设了它用标准的 CFLAGS 变量接收外部参数，
+          # 但实际编译命令里完全没出现我们传的 --sysroot/-I，说明它的
+          # Makefile 用了别的变量名或直接硬编码了参数。与其再猜一次变量名，
+          # 这次直接打印出来，如果本步骤仍然失败，日志里就有权威原文可看，
+          # 不用再靠搜索引擎拼凑第三方仓库的构建细节。
+          echo "----- BEGIN libelf Makefile -----"
+          cat Makefile
+          echo "----- END libelf Makefile -----"
+          echo "----- BEGIN libelf src/config.h -----"
+          cat src/config.h
+          echo "----- END libelf src/config.h -----"
+
+          # --- 直接改写 Makefile 文本本身，不依赖任何环境变量传递 --------
+          # 不管它内部用什么变量名组织 CFLAGS，只要能找到调用编译器的那
+          # 一行（含 $(CC) 的行），就把我们的 sysroot / 头文件搜索路径
+          # 追加进去。这样不需要猜它的变量名对不对，因为是直接编辑执行
+          # 命令本身。同一时间把 libintl.h 的占位头目录也一起加进去，
+          # 一次修复两个问题（架构不对 + libintl.h 缺失）。
+          NDK_SHIM_INCLUDE=$GITHUB_WORKSPACE/scripts/ndk-shims
+          sed -i "s|\$(CC)|\$(CC) --sysroot=$SYSROOT -I$NDK_SHIM_INCLUDE -I$PREFIX/include|g" Makefile
+
+          # 关闭 NLS/gettext：如果 config.h 里有 ENABLE_NLS 定义就删掉；
+          # 就算这一步没匹配到任何内容也不报错（|| true），因为上面的
+          # libintl.h 占位头是更根本的兜底手段，两者任一生效即可
+          sed -i '/ENABLE_NLS/d' src/config.h 2>/dev/null || true
+          sed -i '/#define.*NLS/d' src/config.h 2>/dev/null || true
+
+          # 关闭 zstd 支持以简化依赖面（我们的 .bpf.o 不使用压缩 ELF 段）
           sed -i '/USE_ZSTD/d' src/config.h || true
-          CC=$CC AR=$AR RANLIB=$RANLIB \
-            CFLAGS="--sysroot=$SYSROOT -fPIC -O2 -I$PREFIX/include" \
-            LDLIBS="-lz" LDFLAGS="-L$PREFIX/lib" \
-            PREFIX=$PREFIX \
+
+          echo "----- Makefile after sed patch (grep CC) -----"
+          grep -n '\$(CC)' Makefile || echo "警告：没有匹配到 \$(CC)，说明它编译器调用行写法和预期不同，见上方完整Makefile原文"
+
+          CC=$CC AR=$AR RANLIB=$RANLIB PREFIX=$PREFIX \
             make -j$(nproc) install-static install-headers 2>&1 | tee /tmp/libelf-build.log \
-            || { echo "FATAL: libelf make failed, see log above"; exit 1; }
+            || { echo "FATAL: libelf make failed, full log above. 若上面 grep \$(CC) 显示未匹配，说明需要根据打印出的 Makefile 原文调整 sed 表达式"; exit 1; }
           test -f "$PREFIX/lib/libelf.a" || { echo "FATAL: libelf.a not produced"; exit 1; }
           test -f "$PREFIX/include/libelf.h" || { echo "FATAL: libelf.h not installed"; exit 1; }
           echo "libelf OK: $(ls -la $PREFIX/lib/libelf.a)"
