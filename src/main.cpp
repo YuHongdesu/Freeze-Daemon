@@ -1,4 +1,4 @@
-// src/main.cpp
+// freeze_daemon — 主入口
 #include <csignal>
 #include <fstream>
 #include <memory>
@@ -19,7 +19,6 @@
 #include "api/http_server.h"
 
 constexpr const char* TAG = "Main";
-
 static std::atomic<bool> g_running{true};
 static void on_signal(int) { g_running = false; }
 
@@ -54,7 +53,7 @@ static void init_lists(EventDispatcher& dispatcher) {
     dispatcher.refresh_uid_cache();
 }
 
-// 核心：通过 shell 轮询保持前后台状态，并驱动冻结引擎
+// 核心：通过 shell 轮询维持前后台状态，并驱动冻结引擎
 static void schedule_top_app_refresh(BpfLoader& loader) {
     constexpr int REFRESH_INTERVAL_MS = 30000;
 
@@ -63,7 +62,7 @@ static void schedule_top_app_refresh(BpfLoader& loader) {
 
     auto refresh_fn = std::make_shared<std::function<void()>>();
     *refresh_fn = [&loader, state, refresh_fn]() {
-        loader.refresh_top_app_cgroup();   // 尝试 eBPF 刷新（如果可用）
+        loader.refresh_top_app_cgroup();   // 尝试 eBPF 刷新
         std::string cur = ForegroundFallback::detect_foreground_package();
         if (cur.empty()) {
             TimerManager::instance().schedule(REFRESH_INTERVAL_MS, *refresh_fn);
@@ -79,7 +78,7 @@ static void schedule_top_app_refresh(BpfLoader& loader) {
             FreezeEngine::instance().on_app_foreground(cur);
             state->last_foreground = cur;
         } else {
-            // 前台未变，但仍然需要保持 RunningCache 中有该应用（防止被意外清空）
+            // 前台未变，但保持 RunningCache 中有该应用
             FreezeEngine::instance().on_app_foreground(cur);
         }
 
@@ -98,7 +97,7 @@ int main() {
     ConfigStore::instance().load();
     if (!init_cgroup()) return 1;
 
-    // 构建应用标签缓存（启动 HTTP 前完成）
+    // 构建应用标签缓存（启动 HTTP 前）
     AppLabelCache::instance().build();
 
     TimerManager::instance().start();
@@ -110,7 +109,7 @@ int main() {
         FreezeEngine::instance().set_frozen_cgroups_map(bpf_loader.frozen_cgroup_map());
     }
 
-    // 启动前台检测调度（无论 BPF 是否成功）
+    // 启动前台检测调度
     schedule_top_app_refresh(bpf_loader);
 
     init_lists(dispatcher);
