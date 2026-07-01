@@ -9,7 +9,6 @@
 #include "util/constants.h"
 #include "util/logger.h"
 
-// 事件结构（必须与 freeze_monitor.bpf.c 的 freeze_event 内存布局完全一致）
 struct FreezeEvent {
     uint8_t  type;
     uint8_t  _pad[3];
@@ -31,7 +30,6 @@ public:
         obj_ = bpf_object__open(OBJ_PATH);
         if (!obj_) { LOG_E(TAG, "bpf_object__open failed"); return false; }
 
-        // 跳过已知不稳定或不需要的钩子（仅作保险，现在所有 tp_btf 均已正确编写）
         skip_unstable_probes();
 
         if (bpf_object__load(obj_)) {
@@ -117,20 +115,19 @@ private:
         }
     }
 
-    // 跳过已知可能不稳定的程序（当前全部 tp_btf 已修正，可留空但保留逻辑）
     void skip_unstable_probes() {
         struct bpf_program *prog;
         bpf_object__for_each_program(prog, obj_) {
             const char *name = bpf_program__name(prog);
-            // 如果将来需要跳过某个钩子，可在此添加判断，例如：
+            (void)name;  // 当前无需跳过任何程序，保留以备将来使用
+            // 若需跳过特定程序，在此添加逻辑，如：
             // if (strcmp(name, "on_cgroup_migrate") == 0) {
             //     bpf_program__set_autoload(prog, false);
-            //     LOG_W(TAG, "Skipping on_cgroup_migrate for compatibility");
+            //     LOG_W(TAG, "Skipping on_cgroup_migrate");
             // }
         }
     }
 
-    // 逐个尝试 attach，不因单个失败而整体退出
     bool attach_probes_gracefully() {
         struct bpf_program *prog;
         int attached = 0;
@@ -173,7 +170,6 @@ private:
     }
 
     uint64_t read_top_app_cgroup_id() {
-        // 尝试多个常见路径，提高兼容性
         static const char* paths[] = {
             "/sys/fs/cgroup/top-app/cgroup.id",
             "/sys/fs/cgroup/cpu/top-app/cgroup.id",
