@@ -9,6 +9,9 @@ set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 
 add_compile_options(-Wall -Wextra -O2 -ffunction-sections -fdata-sections)
 
+# 自定义 libbpf 路径（可由命令行 -DLIBBPF_DIR=... 覆盖）
+set(LIBBPF_DIR "${CMAKE_SOURCE_DIR}/prebuilt/libbpf" CACHE PATH "Path to libbpf installation")
+
 # === eBPF 编译 ===
 add_custom_target(bpf
     COMMAND clang -target bpf -O2 -g -mcpu=v2
@@ -28,9 +31,22 @@ target_include_directories(freeze_daemon PRIVATE src)
 # 链接选项
 target_link_options(freeze_daemon PRIVATE -Wl,--gc-sections -Wl,--strip-all -s)
 
-# libbpf
-find_library(LIBBPF_STATIC NAMES libbpf.a HINTS ${CMAKE_SOURCE_DIR}/prebuilt/libbpf)
-find_path(LIBBPF_INCLUDE NAMES bpf/libbpf.h HINTS ${CMAKE_SOURCE_DIR}/prebuilt/libbpf/include)
+# 查找 libbpf（使用传入的 LIBBPF_DIR）
+find_library(LIBBPF_STATIC
+    NAMES libbpf.a
+    HINTS ${LIBBPF_DIR}/lib
+    NO_DEFAULT_PATH
+)
+find_path(LIBBPF_INCLUDE
+    NAMES bpf/libbpf.h
+    HINTS ${LIBBPF_DIR}/include
+    NO_DEFAULT_PATH
+)
+
+if(NOT LIBBPF_STATIC OR NOT LIBBPF_INCLUDE)
+    message(FATAL_ERROR "libbpf not found at ${LIBBPF_DIR}. "
+                        "Ensure it contains lib/libbpf.a and include/bpf/libbpf.h")
+endif()
 
 target_include_directories(freeze_daemon PRIVATE ${LIBBPF_INCLUDE})
 target_link_libraries(freeze_daemon ${LIBBPF_STATIC} pthread elf z)
