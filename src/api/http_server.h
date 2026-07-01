@@ -11,6 +11,7 @@
 #include <atomic>
 #include <algorithm>
 #include <cstdio>
+#include <cctype>
 #include "core/config_store.h"
 #include "core/app_list.h"
 #include "core/app_state.h"
@@ -33,7 +34,7 @@ public:
         setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
         sockaddr_in addr{};
         addr.sin_family      = AF_INET;
-        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_addr.s_addr = INADDR_ANY;   // 0.0.0.0，允许 KernelSU 等访问
         addr.sin_port        = htons(PORT);
         if (::bind(server_fd_, (sockaddr*)&addr, sizeof(addr)) < 0) {
             LOG_E(TAG, "bind() failed on port " + std::to_string(PORT)); return false;
@@ -41,7 +42,7 @@ public:
         ::listen(server_fd_, 8);
         running_ = true;
         accept_thread_ = std::thread(&HttpServer::accept_loop, this);
-        LOG_I(TAG, "HTTP API + UI listening on http://127.0.0.1:" + std::to_string(PORT));
+        LOG_I(TAG, "HTTP API + UI listening on http://0.0.0.0:" + std::to_string(PORT));
         return true;
     }
 
@@ -134,7 +135,7 @@ private:
         return json_response(200, apps_json(apps));
     }
 
-    // ── 配置（已修正键名映射）──
+    // ── 配置（改进的解析和 no-cache）──
     std::string handle_config_get() {
         Config cfg = ConfigStore::instance().get();
         std::ostringstream oss;
@@ -258,40 +259,44 @@ private:
         return oss.str();
     }
 
-    // ── JSON 解析 ──
-    std::string strip_whitespace(const std::string& s) {
-        std::string r; r.reserve(s.size());
-        for (char c : s) if (c != ' ' && c != '\t' && c != '\n' && c != '\r') r += c;
-        return r;
-    }
-
+    // ── 改进的 JSON 解析（容忍空格，直接提取数字/布尔/字符串）──
     int parse_int(const std::string& json, const std::string& key, int def) {
-        std::string clean = strip_whitespace(json);
         std::string search = "\"" + key + "\":";
-        auto pos = clean.find(search);
+        auto pos = json.find(search);
         if (pos == std::string::npos) return def;
         pos += search.size();
-        try { return std::stoi(clean.substr(pos)); } catch (...) { return def; }
+        // 跳过空白
+        while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r')) pos++;
+        // 提取数字（支持负数）
+        std::string val_str;
+        if (pos < json.size() && (json[pos] == '-' || isdigit(json[pos]))) {
+            while (pos < json.size() && (isdigit(json[pos]) || json[pos] == '-')) {
+                val_str += json[pos++];
+            }
+        }
+        if (val_str.empty()) return def;
+        try { return std::stoi(val_str); } catch (...) { return def; }
     }
 
     bool parse_bool(const std::string& json, const std::string& key, bool def) {
-        std::string clean = strip_whitespace(json);
         std::string search = "\"" + key + "\":";
-        auto pos = clean.find(search);
+        auto pos = json.find(search);
         if (pos == std::string::npos) return def;
         pos += search.size();
-        if (pos + 4 > clean.size()) return def;
-        return clean.substr(pos, 4) == "true";
+        // 跳过空白
+        while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r')) pos++;
+        if (pos + 4 <= json.size() && json.substr(pos, 4) == "true") return true;
+        if (pos + 5 <= json.size() && json.substr(pos, 5) == "false") return false;
+        return def;
     }
 
     std::string parse_str(const std::string& json, const std::string& key) {
-        std::string clean = strip_whitespace(json);
         std::string search = "\"" + key + "\":\"";
-        auto pos = clean.find(search);
+        auto pos = json.find(search);
         if (pos == std::string::npos) return "";
         pos += search.size();
-        auto end = clean.find("\"", pos);
-        return (end == std::string::npos) ? "" : clean.substr(pos, end - pos);
+        auto end = json.find("\"", pos);
+        return (end == std::string::npos) ? "" : json.substr(pos, end - pos);
     }
 
     std::string json_response(int code, const std::string& body) {
@@ -308,7 +313,6 @@ private:
         return oss.str();
     }
 
-    // 专门用于配置响应，增加 no-cache 头
     std::string json_response_no_cache(const std::string& body) {
         std::ostringstream oss;
         oss << "HTTP/1.1 200 OK\r\n"
