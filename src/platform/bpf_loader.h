@@ -31,7 +31,7 @@ public:
         obj_ = bpf_object__open(OBJ_PATH);
         if (!obj_) { LOG_E(TAG, "bpf_object__open failed"); return false; }
 
-        // 在加载前跳过不稳定的钩子（如需要）
+        // 跳过已知不稳定或不需要的钩子（仅作保险，现在所有 tp_btf 均已正确编写）
         skip_unstable_probes();
 
         if (bpf_object__load(obj_)) {
@@ -117,17 +117,16 @@ private:
         }
     }
 
-    // 跳过已知不稳定的程序（可选）
+    // 跳过已知可能不稳定的程序（当前全部 tp_btf 已修正，可留空但保留逻辑）
     void skip_unstable_probes() {
         struct bpf_program *prog;
         bpf_object__for_each_program(prog, obj_) {
             const char *name = bpf_program__name(prog);
-            if (strcmp(name, "on_cgroup_migrate") == 0) {
-                // 如果内核不支持 tp_btf/cgroup_migrate，跳过该程序
-                // 可根据内核版本判断，这里为最大化兼容性一律跳过
-                bpf_program__set_autoload(prog, false);
-                LOG_W(TAG, "Skipping on_cgroup_migrate (may not be supported)");
-            }
+            // 如果将来需要跳过某个钩子，可在此添加判断，例如：
+            // if (strcmp(name, "on_cgroup_migrate") == 0) {
+            //     bpf_program__set_autoload(prog, false);
+            //     LOG_W(TAG, "Skipping on_cgroup_migrate for compatibility");
+            // }
         }
     }
 
@@ -139,9 +138,9 @@ private:
 
         bpf_object__for_each_program(prog, obj_) {
             total++;
-            // 跳过被设为不自动加载的程序
             if (!bpf_program__autoload(prog)) {
-                LOG_I(TAG, "Skipping attach for unloaded program: " + std::string(bpf_program__name(prog)));
+                LOG_I(TAG, "Skipping attach for unloaded program: " +
+                          std::string(bpf_program__name(prog)));
                 continue;
             }
 
@@ -152,7 +151,6 @@ private:
                 continue;
             }
             attached++;
-            // link 由 libbpf 管理，无需手动释放（随 object 生命周期）
         }
 
         if (attached == 0) {
@@ -175,12 +173,11 @@ private:
     }
 
     uint64_t read_top_app_cgroup_id() {
-        // 尝试多个可能的路径
+        // 尝试多个常见路径，提高兼容性
         static const char* paths[] = {
             "/sys/fs/cgroup/top-app/cgroup.id",
             "/sys/fs/cgroup/cpu/top-app/cgroup.id",
             "/sys/fs/cgroup/unified/top-app/cgroup.id",
-            "/dev/cgroup_info/cgroup.controllers",  // 其他可能的线索
             nullptr
         };
 
@@ -189,16 +186,11 @@ private:
             if (!f.is_open()) continue;
             uint64_t id = 0;
             f >> id;
-            if (f.fail()) continue;
-            // 部分路径可能不是直接可读的数字，可忽略
-            if (id > 0) {
+            if (!f.fail() && id > 0) {
                 LOG_D(TAG, "Found top-app cgroup.id=" + std::to_string(id) + " at " + paths[i]);
                 return id;
             }
         }
-
-        // 通用降级：遍历 /sys/fs/cgroup 下的所有子目录寻找 top-app
-        // 这里保持简单，返回 0 表示未找到
         return 0;
     }
 

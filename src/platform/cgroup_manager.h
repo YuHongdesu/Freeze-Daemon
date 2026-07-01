@@ -22,8 +22,17 @@ inline std::string cgroup_freeze_path(const std::string& cgroup_dir) {
     return cgroup_dir + "/cgroup.freeze";
 }
 
+// 创建目录，若已存在则确认是目录（而非普通文件）
 inline bool create_dir(const std::string& path) {
-    return mkdir(path.c_str(), 0755) == 0 || errno == EEXIST;
+    if (mkdir(path.c_str(), 0755) == 0) return true;
+    if (errno == EEXIST) {
+        struct stat st;
+        if (stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) return true;
+        // 已存在但不是目录，记录错误并返回 false
+        LOG_E(TAG, path + " exists but is not a directory");
+        return false;
+    }
+    return false;
 }
 
 // 初始化独立 cgroup 子树，与系统 uid_N cgroup 隔离
@@ -44,9 +53,7 @@ inline bool init_cgroup_tree() {
     return true;
 }
 
-// 把进程批量迁入指定 cgroup（一次 open，多次 write，一次 close）
-// 注意：cgroup.procs 每次 write 仍只接受单个 pid（v2 限制），
-// 但合并 fd 打开关闭可以显著减少系统调用次数
+// 把进程批量迁入指定 cgroup（每个 PID 后加换行，符合 v2 要求）
 inline bool move_pids_to(const std::string& cgroup_dir, const std::vector<int>& pids) {
     if (pids.empty()) return true;
 
@@ -59,8 +66,8 @@ inline bool move_pids_to(const std::string& cgroup_dir, const std::vector<int>& 
 
     bool all_ok = true;
     for (int pid : pids) {
-        // 每次 write 后立即 fflush，确保单个 pid 写入失败不影响后续
-        if (fprintf(f, "%d", pid) < 0 || fflush(f) != 0) {
+        // cgroup.procs 要求每个 PID 单独一行
+        if (fprintf(f, "%d\n", pid) < 0 || fflush(f) != 0) {
             LOG_W(TAG, "Failed to move pid " + std::to_string(pid) + " to " + cgroup_dir);
             all_ok = false;
         }
@@ -77,7 +84,7 @@ inline bool move_pids_to_active(const std::vector<int>& pids) {
     return move_pids_to(Path::CGROUP_ACTIVE, pids);
 }
 
-// 查询某包名下所有 pid（通过遍历 /proc 目录，只读实际存在的进程）
+// 查询某包名下所有 pid（通过遍历 /proc 目录，不依赖 d_type）
 inline std::vector<int> get_pids_by_package(const std::string& pkg) {
     std::vector<int> pids;
     DIR* proc_dir = opendir("/proc");
@@ -85,15 +92,19 @@ inline std::vector<int> get_pids_by_package(const std::string& pkg) {
 
     struct dirent* entry;
     while ((entry = readdir(proc_dir)) != nullptr) {
-        // 跳过非数字目录
-        if (entry->d_type != DT_DIR) continue;
+        // 只处理目录名全为数字的条目，不依赖 d_type
         const char* name = entry->d_name;
         if (!isdigit(name[0])) continue;
+
+        // 二次确认是目录（用 stat 以防万一）
+        std::string proc_entry = "/proc/" + std::string(name);
+        struct stat st;
+        if (stat(proc_entry.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) continue;
 
         int pid = atoi(name);
         if (pid <= 0) continue;
 
-        std::string cmdline_path = "/proc/" + std::string(name) + "/cmdline";
+        std::string cmdline_path = proc_entry + "/cmdline";
         auto content = FileUtil::read_str(cmdline_path);
         if (!content || content->empty()) continue;
 

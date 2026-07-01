@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
-// freeze_monitor.bpf.c — 内核侧 eBPF 探针 (v4)
+// freeze_monitor.bpf.c — 内核侧 eBPF 探针 (v4-fixed)
 //
 // 针对 Android 16 + 5.15 GKI + 骁龙 8 Gen 2
 //
 // 关键修复：
-// - on_cgroup_migrate 改用 tp_btf，直接获取 tracepoint 参数，
-//   无需依赖不完整的 trace_event_raw 结构体，且兼容内核 5.10+
-// - 参数顺序按内核真实定义：dst_cgrp, src_cgrp, task, threadgroup
+// - on_cgroup_migrate 改用 tp_btf + BPF_PROG，直接获取 tracepoint 参数
+// - on_suspend_resume 改用 tp_btf + BPF_PROG，避免验证器报错
 // - 前后台切换通过比较 src/dst cgroup id 与 top-app cgroup id 精确判定
-// - suspend_resume 采用 tp_btf 原始参数，避免 vmlinux.h 中结构体缺失
 // - kprobe/cgroup_freeze 依赖编译选项 __TARGET_ARCH_arm64
 
 #include <vmlinux.h>
@@ -136,10 +134,10 @@ int on_process_exit(struct trace_event_raw_sched_process_template *ctx) {
     return 0;
 }
 
-// ── suspend_resume：使用 tp_btf 原始参数 ─────────────────────
-// 直接获取 int 值，无需任何结构体
+// ── suspend_resume：使用 tp_btf + BPF_PROG ─────────────────
+// 直接提取 int 参数，避免验证器将 ctx 当标量处理
 SEC("tp_btf/suspend_resume")
-int on_suspend_resume(int val) {
+int BPF_PROG(on_suspend_resume, int val) {
     __u8 type = val ? EVT_SCREEN_OFF : EVT_SCREEN_ON;
     emit_ev(type, 0, 0);
     return 0;

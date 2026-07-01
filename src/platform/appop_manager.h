@@ -12,6 +12,23 @@ namespace AppOpManager {
 constexpr const char* TAG = "AppOpManager";
 constexpr const char* RESTRICT_LIST_PATH = "/data/adb/modules/freeze-daemon/config/appop_restrict_list.txt";
 
+// ── 工具函数：安全转义 shell 参数 ──────────────────────────
+// 用单引号包裹并转义内部的单引号，防止命令注入
+inline std::string safe_arg(const std::string& s) {
+    std::string escaped;
+    escaped.reserve(s.size() + 4);
+    escaped += '\'';
+    for (char c : s) {
+        if (c == '\'') {
+            escaped += "'\\''";
+        } else {
+            escaped += c;
+        }
+    }
+    escaped += '\'';
+    return escaped;
+}
+
 // 唯一数据源：从 config/appop_restrict_list.txt 加载
 // 与 scripts/service.sh 的 load_restrict_ops() 读取同一份文件，
 // 消除之前 C++ constexpr 数组和 shell 脚本各自硬编码一份的重复维护问题
@@ -35,15 +52,15 @@ inline bool run_cmd(const std::string& cmd) {
     return ret == 0;
 }
 
-// 剥夺单个 AppOp 权限
+// 剥夺单个 AppOp 权限（已转义参数）
 inline bool revoke_op(const std::string& pkg, const std::string& op) {
-    std::string cmd = "cmd appops set " + pkg + " " + op + " deny 2>/dev/null";
+    std::string cmd = "cmd appops set " + safe_arg(pkg) + " " + safe_arg(op) + " deny 2>/dev/null";
     return run_cmd(cmd);
 }
 
-// 恢复单个 AppOp 权限为默认
+// 恢复单个 AppOp 权限为默认（已转义参数）
 inline bool restore_op(const std::string& pkg, const std::string& op) {
-    std::string cmd = "cmd appops set " + pkg + " " + op + " default 2>/dev/null";
+    std::string cmd = "cmd appops set " + safe_arg(pkg) + " " + safe_arg(op) + " default 2>/dev/null";
     return run_cmd(cmd);
 }
 
@@ -67,14 +84,14 @@ inline void restore_all(const std::string& pkg) {
 
 // 踢出 deviceidle（Doze）白名单（仅系统黑名单 app 使用）
 inline void kick_from_doze(const std::string& pkg) {
-    std::string cmd = "cmd deviceidle whitelist -" + pkg + " 2>/dev/null";
+    std::string cmd = "cmd deviceidle whitelist -" + safe_arg(pkg) + " 2>/dev/null";
     run_cmd(cmd);
     LOG_I(TAG, "Doze whitelist removed: " + pkg);
 }
 
 // 恢复进入 deviceidle 白名单
 inline void restore_doze(const std::string& pkg) {
-    std::string cmd = "cmd deviceidle whitelist +" + pkg + " 2>/dev/null";
+    std::string cmd = "cmd deviceidle whitelist +" + safe_arg(pkg) + " 2>/dev/null";
     run_cmd(cmd);
 }
 
