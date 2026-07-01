@@ -75,7 +75,7 @@ static void schedule_top_app_refresh(BpfLoader& loader) {
     constexpr int FALLBACK_TRIGGER_COUNT = 3;
 
     auto refresh_fn = std::make_shared<std::function<void()>>();
-    *refresh_fn = [&loader, refresh_fn, REFRESH_INTERVAL_MS]() {
+    *refresh_fn = [&loader, refresh_fn]() {  // 不再捕获 REFRESH_INTERVAL_MS
         bool ok = loader.refresh_top_app_cgroup();
 
         if (!ok && loader.consecutive_fail_count() >= FALLBACK_TRIGGER_COUNT) {
@@ -115,7 +115,7 @@ int main() {
     EventDispatcher dispatcher;
     if (!init_bpf(bpf_loader, dispatcher)) return 1;
 
-    // 4.5 注入 our_frozen_cgroups map 指针，供 FreezeEngine 使用
+    // 4.5 注入 our_frozen_cgroups map 指针
     FreezeEngine::instance().set_frozen_cgroups_map(bpf_loader.frozen_cgroup_map());
 
     // 4.6 周期刷新 top_app_cgroup_id
