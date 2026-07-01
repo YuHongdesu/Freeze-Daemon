@@ -32,7 +32,7 @@ struct freeze_event {
     __u8  type;
     __u32 uid;
     __u32 pid;
-};  // 实际内存布局含 padding，对齐到 12 字节（type 后 3 字节 padding）
+} __attribute__((packed));  // 实际内存布局含 padding，对齐到 12 字节（type 后 3 字节 padding）
 
 // ── Maps ─────────────────────────────────────────────────────
 
