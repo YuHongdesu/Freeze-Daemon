@@ -32,18 +32,15 @@ jobs:
             libbpf-dev \
             linux-headers-$(uname -r)
 
-      # 4. 编译 eBPF
       - name: Compile eBPF program
         run: |
           clang -target bpf -O2 -g -mcpu=v2 \
             -I src \
+            -I /usr/include \
             -c src/platform/freeze_monitor.bpf.c \
             -o freeze_monitor.bpf.o
           ls -lh freeze_monitor.bpf.o
-          
-          echo "eBPF object: $(ls -lh freeze_monitor.bpf.o)"
 
-      # 5. 为 arm64 交叉编译 libbpf 静态库
       - name: Cross-compile libbpf for arm64
         run: |
           NDK=$NDK_HOME
@@ -59,12 +56,11 @@ jobs:
                BUILD_STATIC_ONLY=1 \
                -j$(nproc)
 
-          mkdir -p $GITHUB_WORKSPACE/prebuilt/libbpf/include
-          cp /tmp/libbpf-build/libbpf.a  $GITHUB_WORKSPACE/prebuilt/libbpf/
-          cp -r /tmp/libbpf/src/*.h       $GITHUB_WORKSPACE/prebuilt/libbpf/include/
-          cp -r /tmp/libbpf/src/uapi      $GITHUB_WORKSPACE/prebuilt/libbpf/include/
+          mkdir -p $GITHUB_WORKSPACE/prebuilt/libbpf/{lib,include/bpf/uapi}
+          cp /tmp/libbpf-build/libbpf.a  $GITHUB_WORKSPACE/prebuilt/libbpf/lib/
+          cp /tmp/libbpf/src/*.h         $GITHUB_WORKSPACE/prebuilt/libbpf/include/bpf/
+          cp -r /tmp/libbpf/src/uapi     $GITHUB_WORKSPACE/prebuilt/libbpf/include/bpf/
 
-      # 6. 编译 C++ Daemon (arm64)
       - name: Compile Daemon (arm64)
         run: |
           cmake -B build \
@@ -72,13 +68,14 @@ jobs:
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-33 \
             -DANDROID_STL=c++_static \
-            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLIBBPF_DIR=$GITHUB_WORKSPACE/prebuilt/libbpf
           cmake --build build --target freeze_daemon -j$(nproc)
           echo "Binary: $(ls -lh build/freeze_daemon)"
 
-      # 7. 组装 KernelSU 模块包
       - name: Package module
         run: |
+          SAFE_REF="${GITHUB_REF_NAME//\//-}"
           PKG=module_package
           mkdir -p $PKG/{bin,config,webui,logs}
 
@@ -97,12 +94,10 @@ jobs:
           cp webui/index.html             $PKG/webui/
 
           cd $PKG
-          zip -r ../freeze-daemon-${{ github.ref_name }}.zip .
+          zip -r ../freeze-daemon-${SAFE_REF}.zip .
           cd ..
-          # 此处已彻底修复 Bash 命令替换的语法错误
-          echo "Package: $(ls -lh freeze-daemon-${{ github.ref_name }}.zip)"
+          echo "Package: $(ls -lh freeze-daemon-${SAFE_REF}.zip)"
 
-      # 8. 上传 Artifact
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -110,7 +105,6 @@ jobs:
           path: freeze-daemon-*.zip
           retention-days: 30
 
-      # 9. 发布 Release
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
