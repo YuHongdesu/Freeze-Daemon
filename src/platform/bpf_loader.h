@@ -30,6 +30,7 @@ public:
         obj_ = bpf_object__open(OBJ_PATH);
         if (!obj_) { LOG_E(TAG, "bpf_object__open failed"); return false; }
 
+        // 跳过内核不支持的钩子（如缺少 BTF 类型的 tp_btf 钩子）
         skip_unstable_probes();
 
         if (bpf_object__load(obj_)) {
@@ -119,12 +120,11 @@ private:
         struct bpf_program *prog;
         bpf_object__for_each_program(prog, obj_) {
             const char *name = bpf_program__name(prog);
-            (void)name;  // 当前无需跳过任何程序，保留以备将来使用
-            // 若需跳过特定程序，在此添加逻辑，如：
-            // if (strcmp(name, "on_cgroup_migrate") == 0) {
-            //     bpf_program__set_autoload(prog, false);
-            //     LOG_W(TAG, "Skipping on_cgroup_migrate");
-            // }
+            // 跳过需要内核 BTF 支持但可能缺失的钩子
+            if (strcmp(name, "on_cgroup_migrate") == 0) {
+                bpf_program__set_autoload(prog, false);
+                LOG_W(TAG, "Skipping on_cgroup_migrate (kernel BTF type not available)");
+            }
         }
     }
 
