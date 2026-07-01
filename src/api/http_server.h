@@ -6,20 +6,19 @@
 #include <queue>
 #include <condition_variable>
 #include <sys/socket.h>
-#include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <thread>
 #include <atomic>
+#include <algorithm>  // for std::remove_if
 #include "core/config_store.h"
 #include "core/app_list.h"
 #include "core/app_state.h"
-#include "core/freeze_engine.h"   // RunningCache
+#include "core/freeze_engine.h"
 #include "util/logger.h"
 #include "util/reboot_flag.h"
 
-// 接口层：HTTP API，只做请求解析和响应序列化，不含业务逻辑
 class HttpServer {
 public:
     static constexpr const char* TAG  = "HttpServer";
@@ -49,15 +48,14 @@ public:
 
     void stop() {
         running_ = false;
-        ::shutdown(server_fd_, SHUT_RDWR);  // 让 accept() 立即返回错误
+        ::shutdown(server_fd_, SHUT_RDWR);   // 唤醒 accept
+        if (accept_thread_.joinable()) accept_thread_.join();
+        // 现在 accept 已退出，安全关闭
         ::close(server_fd_);
         server_fd_ = -1;
-        if (accept_thread_.joinable()) accept_thread_.join();
     }
 
 private:
-    // ── 请求解析 ─────────────────────────────────────────────
-
     struct Request {
         std::string method;
         std::string path;
@@ -68,13 +66,13 @@ private:
         Request req;
         std::istringstream iss(raw);
         iss >> req.method >> req.path;
-        // 查找 body（\r\n\r\n 之后）
+        // 去掉查询参数，只保留路径部分
+        auto qpos = req.path.find('?');
+        if (qpos != std::string::npos) req.path.resize(qpos);
         auto pos = raw.find("\r\n\r\n");
         if (pos != std::string::npos) req.body = raw.substr(pos + 4);
         return req;
     }
-
-    // ── 路由分发 ─────────────────────────────────────────────
 
     std::string handle(const Request& req) {
         if (req.path == "/api/status")             return handle_status();
@@ -90,8 +88,7 @@ private:
         return json_response(404, R"({"error":"not found"})");
     }
 
-    // ── 各接口实现 ────────────────────────────────────────────
-
+    // ── 各接口实现（不变）────────────────────────────────────
     std::string handle_status() {
         std::ostringstream oss;
         oss << R"({"running":true,"needs_reboot":)"
@@ -104,7 +101,6 @@ private:
         auto frozen  = AppStateStore::instance().get_frozen_packages();
         auto running = RunningCache::instance().get_all();
 
-        // 区分用户app冻结 vs 系统app（黑名单限制不体现在冻结状态里）
         size_t user_frozen = 0;
         for (const auto& pkg : frozen) {
             if (!AppList::instance().is_sys_restricted(pkg)) user_frozen++;
@@ -119,7 +115,6 @@ private:
             << R"(,"apps":[)";
         for (size_t i = 0; i < frozen.size(); ++i) {
             if (i) oss << ",";
-            // pkg name 作为 name 展示（Daemon 无 PackageManager，显示包名）
             const auto& pkg = frozen[i];
             oss << R"({"pkg":")" << pkg << R"(","name":")" << pkg
                 << R"(","procs":1,"mem":"—"})";
@@ -183,15 +178,9 @@ private:
 
         bool ok;
         if (type == ListType::WHITELIST) {
-            // 白名单（用户app豁免冻结）实时生效：FreezeEngine 每次决策都
-            // 现查 AppList::is_user_exempt()，不需要重启
             ok = add ? AppList::instance().add_user_exempt(pkg)
                      : AppList::instance().remove_user_exempt(pkg);
         } else {
-            // 黑名单（系统app限制）不会立即生效：实际的 AppOp 剥夺 +
-            // 踢出 Doze 白名单只在 service.sh 的 apply_system_blacklist()
-            // 里执行一次（开机时），Daemon 运行期间不会重新调用这段逻辑，
-            // 借鉴 Frosty 的 *_needs_reboot 标记机制提示用户
             ok = add ? AppList::instance().add_sys_restricted(pkg)
                      : AppList::instance().remove_sys_restricted(pkg);
             if (ok) RebootFlag::mark("system_blacklist");
@@ -201,36 +190,45 @@ private:
                              ok ? R"({"ok":true})" : R"({"error":"failed"})");
     }
 
-    // ── 极简 JSON 解析（带异常保护）────────────────────────────
+    // ── 改进的 JSON 解析（先移除空白字符）─────────────────
+    std::string strip_whitespace(const std::string& s) {
+        std::string result;
+        result.reserve(s.size());
+        for (char c : s) {
+            if (c != ' ' && c != '\t' && c != '\n' && c != '\r') result += c;
+        }
+        return result;
+    }
 
     int parse_int(const std::string& json, const std::string& key, int def) {
+        std::string clean = strip_whitespace(json);
         std::string search = "\"" + key + "\":";
-        auto pos = json.find(search);
+        auto pos = clean.find(search);
         if (pos == std::string::npos) return def;
         pos += search.size();
-        try { return std::stoi(json.substr(pos)); }
+        try { return std::stoi(clean.substr(pos)); }
         catch (...) { return def; }
     }
 
     bool parse_bool(const std::string& json, const std::string& key, bool def) {
+        std::string clean = strip_whitespace(json);
         std::string search = "\"" + key + "\":";
-        auto pos = json.find(search);
+        auto pos = clean.find(search);
         if (pos == std::string::npos) return def;
         pos += search.size();
-        if (pos + 4 > json.size()) return def;
-        return json.substr(pos, 4) == "true";
+        if (pos + 4 > clean.size()) return def;
+        return clean.substr(pos, 4) == "true";
     }
 
     std::string parse_str(const std::string& json, const std::string& key) {
+        std::string clean = strip_whitespace(json);
         std::string search = "\"" + key + "\":\"";
-        auto pos = json.find(search);
+        auto pos = clean.find(search);
         if (pos == std::string::npos) return "";
         pos += search.size();
-        auto end = json.find("\"", pos);
-        return (end == std::string::npos) ? "" : json.substr(pos, end - pos);
+        auto end = clean.find("\"", pos);
+        return (end == std::string::npos) ? "" : clean.substr(pos, end - pos);
     }
-
-    // ── HTTP 响应构造 ─────────────────────────────────────────
 
     std::string json_response(int code, const std::string& body) {
         std::string status = (code == 200) ? "200 OK"
@@ -246,13 +244,8 @@ private:
         return oss.str();
     }
 
-    // ── Socket accept 循环 + 固定线程池 ──────────────────────
-    // 性能优化：原实现每个连接 detach 一个新线程，高频轮询场景下
-    // （Web UI 每 3 秒请求一次 /api/live）频繁创建/销毁线程有不小的
-    // 系统调用开销。改为固定数量的 worker 线程从队列里取连接处理，
-    // 避免每次请求都付出线程创建成本。
-
-    static constexpr int WORKER_COUNT = 4;
+    // ── 线程池：仅使用 1 个 worker，避免并发竞争 ──────────
+    static constexpr int WORKER_COUNT = 1;  // 串行处理即可
 
     void accept_loop() {
         for (int i = 0; i < WORKER_COUNT; ++i) {
@@ -263,7 +256,6 @@ private:
             if (client < 0) continue;
             push_client(client);
         }
-        // 通知所有 worker 退出
         {
             std::lock_guard<std::mutex> lk(queue_mutex_);
             shutting_down_ = true;
@@ -292,7 +284,14 @@ private:
                 fd = client_queue_.front();
                 client_queue_.pop();
             }
-            handle_client(fd);
+            // 关键：捕获所有异常，防止 worker 意外退出
+            try {
+                handle_client(fd);
+            } catch (const std::exception& e) {
+                LOG_E(TAG, std::string("Worker exception: ") + e.what());
+            } catch (...) {
+                LOG_E(TAG, "Worker unknown exception");
+            }
         }
     }
 
@@ -310,8 +309,6 @@ private:
     int               server_fd_{-1};
     std::atomic<bool> running_{false};
     std::thread       accept_thread_;
-
-    // 固定 worker 线程池，避免每个请求都创建/销毁新线程
     std::vector<std::thread> workers_;
     std::queue<int>          client_queue_;
     std::mutex                queue_mutex_;
