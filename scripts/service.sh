@@ -125,6 +125,8 @@ init_dirs() {
 
 start_daemon() {
     local daemon="$MODDIR/bin/freeze_daemon"
+    # 确保二进制可执行（zip 解压可能丢失执行权限）
+    chmod 755 "$daemon" 2>/dev/null
     [ ! -x "$daemon" ] && { log "freeze_daemon not found"; return; }
     pkill -f freeze_daemon 2>/dev/null
     sleep 1
