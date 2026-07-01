@@ -32,8 +32,10 @@ target_include_directories(freeze_daemon PRIVATE src)
 # 链接选项
 target_link_options(freeze_daemon PRIVATE -Wl,--gc-sections -Wl,--strip-all -s)
 
-# libbpf（直接指定路径）
+# libbpf 及其依赖
 set(LIBBPF_LIB "${LIBBPF_DIR}/lib/libbpf.a")
+set(LIBELF_LIB "${LIBBPF_DIR}/lib/libelf.a")
+set(LIBZ_LIB   "${LIBBPF_DIR}/lib/libz.a")
 set(LIBBPF_INCLUDE "${LIBBPF_DIR}/include")
 
 if(NOT EXISTS "${LIBBPF_LIB}" OR NOT EXISTS "${LIBBPF_INCLUDE}/bpf/libbpf.h")
@@ -42,6 +44,6 @@ if(NOT EXISTS "${LIBBPF_LIB}" OR NOT EXISTS "${LIBBPF_INCLUDE}/bpf/libbpf.h")
 endif()
 
 target_include_directories(freeze_daemon PRIVATE ${LIBBPF_INCLUDE})
-target_link_libraries(freeze_daemon ${LIBBPF_LIB} pthread elf z)
+target_link_libraries(freeze_daemon ${LIBBPF_LIB} ${LIBELF_LIB} ${LIBZ_LIB})
 
 message(STATUS "freeze_daemon configured. libbpf: ${LIBBPF_LIB}")
