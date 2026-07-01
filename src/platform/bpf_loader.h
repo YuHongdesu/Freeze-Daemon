@@ -30,7 +30,6 @@ public:
         obj_ = bpf_object__open(OBJ_PATH);
         if (!obj_) { LOG_E(TAG, "bpf_object__open failed"); return false; }
 
-        // 跳过内核不支持的钩子（如缺少 BTF 类型的 tp_btf 钩子）
         skip_unstable_probes();
 
         if (bpf_object__load(obj_)) {
@@ -70,6 +69,12 @@ public:
 
         uint64_t cg_id = read_top_app_cgroup_id();
         if (cg_id == 0) {
+            // 如果系统没有可用的 cgroup2 top-app，不累加计数，避免无意义日志
+            static bool v2_healthy = []{
+                std::ifstream test("/sys/fs/cgroup/cgroup.controllers");
+                return test.is_open();
+            }();
+            if (!v2_healthy) return false;  // 静默退出，不增加 fail 计数
             if (++consecutive_fail_count_ >= FAIL_WARN_THRESHOLD) {
                 LOG_W(TAG, "top-app cgroup.id read failed " +
                            std::to_string(consecutive_fail_count_) +
@@ -120,7 +125,6 @@ private:
         struct bpf_program *prog;
         bpf_object__for_each_program(prog, obj_) {
             const char *name = bpf_program__name(prog);
-            // 跳过需要内核 BTF 支持但可能缺失的钩子
             if (strcmp(name, "on_cgroup_migrate") == 0) {
                 bpf_program__set_autoload(prog, false);
                 LOG_W(TAG, "Skipping on_cgroup_migrate (kernel BTF type not available)");
@@ -170,6 +174,13 @@ private:
     }
 
     uint64_t read_top_app_cgroup_id() {
+        // 快速检测 cgroup2 是否健康
+        static bool v2_healthy = []{
+            std::ifstream test("/sys/fs/cgroup/cgroup.controllers");
+            return test.is_open();
+        }();
+        if (!v2_healthy) return 0;  // 静默返回，不影响 fail 计数
+
         static const char* paths[] = {
             "/sys/fs/cgroup/top-app/cgroup.id",
             "/sys/fs/cgroup/cpu/top-app/cgroup.id",
