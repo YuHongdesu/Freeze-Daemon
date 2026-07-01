@@ -159,6 +159,7 @@ jobs:
           cp config/freeze.conf           $PKG/config/
           cp config/user_whitelist.txt    $PKG/config/
           cp config/system_blacklist.txt  $PKG/config/
+          cp config/appop_restrict_list.txt $PKG/config/
           cp webroot/index.html             $PKG/webroot/
           cd $PKG
           zip -r ../Freeze-Daemon-${SAFE_REF}.zip .
