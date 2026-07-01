@@ -51,6 +51,7 @@ jobs:
 
           git clone --depth=1 --branch v1.4.0 https://github.com/libbpf/libbpf.git /tmp/libbpf
           cd /tmp/libbpf/src
+          mkdir -p /tmp/libbpf-build
           make CC="$CC" \
                CFLAGS="--sysroot=$SYSROOT -target aarch64-linux-android33" \
                OBJDIR=/tmp/libbpf-build \
