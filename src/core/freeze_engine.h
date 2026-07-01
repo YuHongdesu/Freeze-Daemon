@@ -5,7 +5,7 @@
 #include <mutex>
 #include <atomic>
 #include <bpf/libbpf.h>
-#include <bpf/bpf.h>          // BPF_ANY 等
+#include <bpf/bpf.h>
 #include "core/app_state.h"
 #include "core/app_list.h"
 #include "core/config_store.h"
@@ -17,6 +17,7 @@
 #include "util/timer.h"
 #include "util/logger.h"
 
+// ── RunningCache（移动定义到这里或单独文件，保持原样）──────
 class RunningCache {
 public:
     static RunningCache& instance() {
@@ -50,12 +51,16 @@ public:
         return inst;
     }
 
+    // ── 公共接口（均被全局锁保护）─────────────────────────
+
     void on_app_foreground(const std::string& pkg) {
+        std::lock_guard<std::mutex> lk(mutex_);
         cancel_pending_timer(pkg);
         do_unfreeze(pkg);
     }
 
     void on_app_background(const std::string& pkg) {
+        std::lock_guard<std::mutex> lk(mutex_);
         auto state = AppStateStore::instance().get_state(pkg);
         if (state == FreezeState::FROZEN)     return;
         if (state == FreezeState::PENDING_BG) return;
@@ -65,6 +70,7 @@ public:
     }
 
     void on_screen_off(const std::string& foreground_pkg) {
+        std::lock_guard<std::mutex> lk(mutex_);
         const auto& cfg = ConfigStore::instance().get();
         cancel_screen_off_timer();
 
@@ -82,18 +88,21 @@ public:
     }
 
     void on_screen_on() {
+        std::lock_guard<std::mutex> lk(mutex_);
         cancel_screen_off_timer();
         DeepSleepManager::instance().cancel_and_exit();
         LOG_I(TAG, "Screen on, silent");
     }
 
     void on_proc_died(const std::string& pkg) {
+        std::lock_guard<std::mutex> lk(mutex_);
         RunningCache::instance().remove(pkg);
         cancel_pending_timer(pkg);
         AppStateStore::instance().erase(pkg);
     }
 
     void on_system_unfreeze(const std::string& pkg) {
+        std::lock_guard<std::mutex> lk(mutex_);
         auto state = AppStateStore::instance().get_state(pkg);
         if (state != FreezeState::FROZEN) return;
 
@@ -109,16 +118,18 @@ public:
     }
 
     void start_freezer_guard() {
-        if (freezer_guard_started_.exchange(true)) {
+        std::lock_guard<std::mutex> lk(mutex_);
+        if (freezer_guard_started_) {
             LOG_W(TAG, "start_freezer_guard called more than once, ignoring");
             return;
         }
+        freezer_guard_started_ = true;
         const int CHECK_INTERVAL_MS = 180000;
         schedule_freezer_check(CHECK_INTERVAL_MS);
     }
 
-    // 接收 map 指针（而非 fd）
     void set_frozen_cgroups_map(struct bpf_map *map) {
+        std::lock_guard<std::mutex> lk(mutex_);
         frozen_cgroups_map_ = map;
     }
 
@@ -129,6 +140,8 @@ public:
 
 private:
     FreezeEngine() = default;
+
+    // ── 所有私有方法均在锁外被调用，调用者已持锁 ─────────
 
     void do_freeze(const std::string& pkg) {
         if (AppStateStore::instance().get_state(pkg) == FreezeState::FROZEN) return;
@@ -150,6 +163,7 @@ private:
 
         update_frozen_cgroups_map(pkg, true);
 
+        // 冻结时剥夺非豁免应用的 AppOp
         if (ConfigStore::instance().get().user_appop_restrict
             && !AppList::instance().is_user_exempt(pkg)) {
             AppOpManager::revoke_all(pkg);
@@ -172,7 +186,9 @@ private:
 
         update_frozen_cgroups_map(pkg, false);
 
-        if (AppList::instance().is_user_exempt(pkg)) {
+        // 修正：恢复非豁免应用的 AppOp
+        if (ConfigStore::instance().get().user_appop_restrict
+            && !AppList::instance().is_user_exempt(pkg)) {
             AppOpManager::restore_all(pkg);
         }
 
@@ -182,6 +198,8 @@ private:
     void schedule_freeze(const std::string& pkg, int delay_ms) {
         AppStateStore::instance().set_state(pkg, FreezeState::PENDING_BG);
         auto id = TimerManager::instance().schedule(delay_ms, [this, pkg]{
+            // 定时器回调也需要持有全局锁
+            std::lock_guard<std::mutex> lk(mutex_);
             if (AppStateStore::instance().get_state(pkg) != FreezeState::PENDING_BG) return;
             do_freeze(pkg);
         });
@@ -200,12 +218,14 @@ private:
     }
 
     void freeze_all_managed(const std::string& last_foreground) {
+        // 定时器回调，调用者已持有锁
         auto snapshot = RunningCache::instance().get_all();
         for (const auto& pkg : snapshot) {
             if (should_skip_freeze(pkg)) continue;
             cancel_pending_timer(pkg);
             do_freeze(pkg);
         }
+        // 确保前台应用也被冻结（可能不在 RunningCache 中？但通常会在）
         if (!last_foreground.empty() && !should_skip_freeze(last_foreground)) {
             cancel_pending_timer(last_foreground);
             do_freeze(last_foreground);
@@ -223,7 +243,7 @@ private:
         AppStateStore::instance().set_state(pkg, FreezeState::RUNNING);
         AppStateStore::instance().reset_bounce(pkg);
         TimerManager::instance().schedule(backoff, [this, pkg]{
-            on_app_background(pkg);
+            on_app_background(pkg);   // 自动持有锁
         });
 
         if (++freezer_suspect_count_ >= FREEZER_SUSPECT_THRESHOLD) {
@@ -234,6 +254,7 @@ private:
 
     void schedule_freezer_check(int interval_ms) {
         TimerManager::instance().schedule(interval_ms, [this, interval_ms]{
+            std::lock_guard<std::mutex> lk(mutex_);
             if (is_system_freezer_enabled()) {
                 LOG_W(TAG, "System freezer was re-enabled externally, disabling again");
                 reassert_freezer_disabled();
@@ -258,7 +279,6 @@ private:
         LOG_I(TAG, "System freezer re-disabled");
     }
 
-    // 使用新的 bpf_map__update_elem / bpf_map__delete_elem
     void update_frozen_cgroups_map(const std::string& /*pkg*/, bool frozen) {
         if (!frozen_cgroups_map_) return;
 
@@ -286,14 +306,17 @@ private:
         return (it != pkg_to_uid_.end()) ? it->second : 0;
     }
 
+    // ── 成员变量 ────────────────────────────────────────
+    std::mutex mutex_;   // 全局锁
     TimerManager::TimerId screen_off_timer_ = TimerManager::INVALID_TIMER;
     struct bpf_map *frozen_cgroups_map_ = nullptr;
 
     static constexpr int FREEZER_SUSPECT_THRESHOLD = 3;
     int freezer_suspect_count_ = 0;
 
-    std::atomic<bool> freezer_guard_started_{false};
+    bool freezer_guard_started_ = false;   // 不再需要 atomic，被锁保护
 
+    // uid 缓存
     mutable std::mutex uid_cache_mutex_;
     std::unordered_map<std::string, uint32_t> pkg_to_uid_;
 };

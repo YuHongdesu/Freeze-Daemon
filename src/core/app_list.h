@@ -6,7 +6,6 @@
 #include "util/constants.h"
 #include "util/logger.h"
 
-// 管理白名单（用户app豁免）和黑名单（系统app限制）的纯数据层
 class AppList {
 public:
     static constexpr const char* TAG = "AppList";
@@ -16,8 +15,7 @@ public:
         return inst;
     }
 
-    // ── 用户app白名单（豁免冻结）──────────────────────────
-
+    // ── 用户白名单 ──────────────────────────────────────
     bool is_user_exempt(const std::string& pkg) const {
         std::lock_guard<std::mutex> lk(mutex_);
         return user_whitelist_.count(pkg) > 0;
@@ -36,8 +34,7 @@ public:
         return user_whitelist_;
     }
 
-    // ── 系统app黑名单（限制目标）──────────────────────────
-
+    // ── 系统黑名单 ──────────────────────────────────────
     bool is_sys_restricted(const std::string& pkg) const {
         std::lock_guard<std::mutex> lk(mutex_);
         return sys_blacklist_.count(pkg) > 0;
@@ -69,13 +66,20 @@ private:
 
     enum class SetOp { ADD, REMOVE };
 
+    // 原子修改：先构建新集合，写入文件成功后再替换内存集合
     bool modify_set(std::set<std::string>& set, const std::string& pkg,
                     SetOp op, const std::string& path) {
         if (pkg.empty()) return false;
         std::lock_guard<std::mutex> lk(mutex_);
-        if (op == SetOp::ADD)    set.insert(pkg);
-        else                     set.erase(pkg);
-        return FileUtil::write_lines(path, set);
+
+        auto target = set;  // 复制
+        if (op == SetOp::ADD) target.insert(pkg);
+        else                  target.erase(pkg);
+
+        if (!FileUtil::write_lines(path, target)) return false;
+
+        set = std::move(target);
+        return true;
     }
 
     mutable std::mutex    mutex_;

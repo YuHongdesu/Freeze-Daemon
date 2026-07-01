@@ -2,6 +2,7 @@
 #include <string>
 #include <unordered_map>
 #include <mutex>
+#include <vector>
 #include "util/timer.h"
 #include "util/logger.h"
 
@@ -21,8 +22,8 @@ inline const char* state_name(FreezeState s) {
 }
 
 struct AppCtx {
-    FreezeState          state        = FreezeState::RUNNING;
-    int                  bounce_count = 0;   // 被系统解冻的次数
+    FreezeState          state         = FreezeState::RUNNING;
+    int                  bounce_count  = 0;   // 被系统解冻的次数
     TimerManager::TimerId pending_timer = TimerManager::INVALID_TIMER;
 };
 
@@ -62,9 +63,12 @@ public:
         store_[pkg].pending_timer = id;
     }
 
+    // 加固：显式检查存在才累加，避免隐式插入无意义的条目
     int increment_bounce(const std::string& pkg) {
         std::lock_guard<std::mutex> lk(mutex_);
-        return ++store_[pkg].bounce_count;
+        auto it = store_.find(pkg);
+        if (it == store_.end()) return 0;   // 不存在则忽略
+        return ++it->second.bounce_count;
     }
 
     void reset_bounce(const std::string& pkg) {
@@ -99,6 +103,6 @@ public:
 private:
     AppStateStore() = default;
 
-    mutable std::mutex                        mutex_;
-    std::unordered_map<std::string, AppCtx>  store_;
+    mutable std::mutex                       mutex_;
+    std::unordered_map<std::string, AppCtx> store_;
 };

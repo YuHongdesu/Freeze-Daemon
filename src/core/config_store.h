@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <mutex>
 #include <sstream>
+#include <stdexcept>      // std::invalid_argument, std::out_of_range
 #include "util/file_util.h"
 #include "util/constants.h"
 #include "util/logger.h"
@@ -61,34 +62,49 @@ public:
 private:
     ConfigStore() { load(); }
 
-    // key=value 格式解析
+    // key=value 格式解析，带异常保护
     Config parse(const std::string& content) {
         Config cfg;
         std::istringstream iss(content);
         std::string line;
+        int line_no = 0;
         while (std::getline(iss, line)) {
+            line_no++;
             auto pos = line.find('=');
             if (pos == std::string::npos || line[0] == '#') continue;
             std::string key = trim(line.substr(0, pos));
             std::string val = trim(line.substr(pos + 1));
-            apply_kv(cfg, key, val);
+            if (key.empty()) continue;  // 忽略空键
+
+            try {
+                apply_kv(cfg, key, val);
+            } catch (const std::exception& e) {
+                LOG_W(TAG, "Config parse error at line " + std::to_string(line_no) +
+                           ": " + e.what() + " (key=" + key + ", val=" + val + ")");
+            } catch (...) {
+                LOG_W(TAG, "Config parse unknown error at line " + std::to_string(line_no));
+            }
         }
         return cfg;
     }
 
     void apply_kv(Config& cfg, const std::string& key, const std::string& val) {
-        auto to_int  = [](const std::string& s){ return std::stoi(s); };
-        auto to_bool = [](const std::string& s){ return s == "1" || s == "true"; };
+        // 安全的数字转换：捕获非法值异常
+        auto safe_stoi = [](const std::string& s) -> int {
+            if (s.empty()) throw std::invalid_argument("empty value");
+            return std::stoi(s);
+        };
 
-        if      (key == "bg_freeze_delay_ms")    cfg.bg_freeze_delay_ms   = to_int(val);
-        else if (key == "screen_off_delay_ms")   cfg.screen_off_delay_ms  = to_int(val);
-        else if (key == "bounce_limit")          cfg.bounce_limit         = to_int(val);
-        else if (key == "bounce_backoff_ms")     cfg.bounce_backoff_ms    = to_int(val);
-        else if (key == "compaction_on")         cfg.compaction_on        = to_bool(val);
-        else if (key == "wifi_scan_off")         cfg.wifi_scan_off        = to_bool(val);
-        else if (key == "deep_sleep_on")         cfg.deep_sleep_on        = to_bool(val);
-        else if (key == "deep_sleep_delay_ms")   cfg.deep_sleep_delay_ms  = to_int(val);
-        else if (key == "user_appop_restrict")   cfg.user_appop_restrict  = to_bool(val);
+        if      (key == "bg_freeze_delay_ms")    cfg.bg_freeze_delay_ms   = safe_stoi(val);
+        else if (key == "screen_off_delay_ms")   cfg.screen_off_delay_ms  = safe_stoi(val);
+        else if (key == "bounce_limit")          cfg.bounce_limit         = safe_stoi(val);
+        else if (key == "bounce_backoff_ms")     cfg.bounce_backoff_ms    = safe_stoi(val);
+        else if (key == "compaction_on")         cfg.compaction_on        = (val == "1" || val == "true");
+        else if (key == "wifi_scan_off")         cfg.wifi_scan_off        = (val == "1" || val == "true");
+        else if (key == "deep_sleep_on")         cfg.deep_sleep_on        = (val == "1" || val == "true");
+        else if (key == "deep_sleep_delay_ms")   cfg.deep_sleep_delay_ms  = safe_stoi(val);
+        else if (key == "user_appop_restrict")   cfg.user_appop_restrict  = (val == "1" || val == "true");
+        // 未知键忽略，不抛异常
     }
 
     std::string serialize(const Config& cfg) {
