@@ -41,16 +41,6 @@ jobs:
           mkdir -p /tmp/arm64-root
           for deb in *.deb; do dpkg-deb -x "$deb" /tmp/arm64-root; done
 
-      - name: Compile eBPF program
-        run: |
-          clang -target bpf -O2 -g -mcpu=v2 \
-            -D__TARGET_ARCH_arm64 \
-            -I src \
-            -I /usr/include \
-            -c src/platform/freeze_monitor.bpf.c \
-            -o freeze_monitor.bpf.o
-          ls -lh freeze_monitor.bpf.o
-
       - name: Cross-compile libbpf for arm64
         run: |
           NDK=$NDK_HOME
@@ -73,7 +63,6 @@ jobs:
                BUILD_STATIC_ONLY=1 \
                -j$(nproc)
 
-          # 安装到预定义位置，确保目录结构正确
           INSTALL_DIR=$GITHUB_WORKSPACE/prebuilt/libbpf
           mkdir -p $INSTALL_DIR/lib $INSTALL_DIR/include/bpf
           cp -v /tmp/libbpf-build/libbpf.a  $INSTALL_DIR/lib/
@@ -86,7 +75,7 @@ jobs:
           echo "=== checking libbpf.a ==="
           file $GITHUB_WORKSPACE/prebuilt/libbpf/lib/libbpf.a
 
-      - name: Compile Daemon (arm64)
+      - name: Compile Freeze Daemon
         run: |
           cmake -B build \
             -DCMAKE_TOOLCHAIN_FILE=$NDK_HOME/build/cmake/android.toolchain.cmake \
@@ -109,7 +98,7 @@ jobs:
           chmod +x $PKG/service.sh
 
           cp build/freeze_daemon          $PKG/bin/
-          cp freeze_monitor.bpf.o         $PKG/bin/
+          cp build/freeze_monitor.bpf.o   $PKG/bin/
           chmod +x $PKG/bin/freeze_daemon
 
           cp config/freeze.conf           $PKG/config/
