@@ -151,7 +151,7 @@ jobs:
         run: |
           SAFE_REF="${GITHUB_REF_NAME//\//-}"
           PKG=module_package
-          mkdir -p $PKG/{bin,config,webui,logs}
+          mkdir -p $PKG/{bin,config,webroot,logs}
           cp module.prop                  $PKG/
           cp scripts/service.sh           $PKG/service.sh && chmod +x $PKG/service.sh
           cp build/freeze_daemon          $PKG/bin/   && chmod +x $PKG/bin/freeze_daemon
@@ -159,24 +159,24 @@ jobs:
           cp config/freeze.conf           $PKG/config/
           cp config/user_whitelist.txt    $PKG/config/
           cp config/system_blacklist.txt  $PKG/config/
-          cp webui/index.html             $PKG/webui/
+          cp webroot/index.html             $PKG/webroot/
           cd $PKG
-          zip -r ../freeze-daemon-${SAFE_REF}.zip .
+          zip -r ../Freeze-Daemon-${SAFE_REF}.zip .
           cd ..
-          echo "Package: $(ls -lh freeze-daemon-${SAFE_REF}.zip)"
+          echo "Package: $(ls -lh Freeze-Daemon-${SAFE_REF}.zip)"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: freeze-daemon-module
-          path: freeze-daemon-*.zip
+          name: Freeze-Daemon
+          path: Freeze-Daemon-*.zip
           retention-days: 30
 
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: freeze-daemon-*.zip
+          files: Freeze-Daemon-*.zip
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
