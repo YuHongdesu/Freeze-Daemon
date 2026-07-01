@@ -15,6 +15,7 @@ set(LIBBPF_DIR "${CMAKE_SOURCE_DIR}/prebuilt/libbpf" CACHE PATH "Path to libbpf 
 # === eBPF 编译 ===
 add_custom_target(bpf
     COMMAND clang -target bpf -O2 -g -mcpu=v2
+            -D__TARGET_ARCH_arm64
             -I${CMAKE_SOURCE_DIR}/src
             -c ${CMAKE_SOURCE_DIR}/src/platform/freeze_monitor.bpf.c
             -o ${CMAKE_BINARY_DIR}/freeze_monitor.bpf.o
@@ -31,7 +32,7 @@ target_include_directories(freeze_daemon PRIVATE src)
 # 链接选项
 target_link_options(freeze_daemon PRIVATE -Wl,--gc-sections -Wl,--strip-all -s)
 
-# libbpf（直接指定路径，避免 find 缓存问题）
+# libbpf（直接指定路径）
 set(LIBBPF_LIB "${LIBBPF_DIR}/lib/libbpf.a")
 set(LIBBPF_INCLUDE "${LIBBPF_DIR}/include")
 
