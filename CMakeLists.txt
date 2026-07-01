@@ -31,24 +31,16 @@ target_include_directories(freeze_daemon PRIVATE src)
 # 链接选项
 target_link_options(freeze_daemon PRIVATE -Wl,--gc-sections -Wl,--strip-all -s)
 
-# 查找 libbpf（使用传入的 LIBBPF_DIR）
-find_library(LIBBPF_STATIC
-    NAMES libbpf.a
-    HINTS ${LIBBPF_DIR}/lib
-    NO_DEFAULT_PATH
-)
-find_path(LIBBPF_INCLUDE
-    NAMES bpf/libbpf.h
-    HINTS ${LIBBPF_DIR}/include
-    NO_DEFAULT_PATH
-)
+# libbpf（直接指定路径，避免 find 缓存问题）
+set(LIBBPF_LIB "${LIBBPF_DIR}/lib/libbpf.a")
+set(LIBBPF_INCLUDE "${LIBBPF_DIR}/include")
 
-if(NOT LIBBPF_STATIC OR NOT LIBBPF_INCLUDE)
+if(NOT EXISTS "${LIBBPF_LIB}" OR NOT EXISTS "${LIBBPF_INCLUDE}/bpf/libbpf.h")
     message(FATAL_ERROR "libbpf not found at ${LIBBPF_DIR}. "
-                        "Ensure it contains lib/libbpf.a and include/bpf/libbpf.h")
+                        "Expected ${LIBBPF_LIB} and ${LIBBPF_INCLUDE}/bpf/libbpf.h")
 endif()
 
 target_include_directories(freeze_daemon PRIVATE ${LIBBPF_INCLUDE})
-target_link_libraries(freeze_daemon ${LIBBPF_STATIC} pthread elf z)
+target_link_libraries(freeze_daemon ${LIBBPF_LIB} pthread elf z)
 
-message(STATUS "freeze_daemon configured. libbpf: ${LIBBPF_STATIC}")
+message(STATUS "freeze_daemon configured. libbpf: ${LIBBPF_LIB}")
