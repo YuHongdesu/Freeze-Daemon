@@ -11,16 +11,11 @@
 #include <iostream>
 #include <atomic>
 #include <cstdio>
+#include <ctime>
 #include "constants.h"
 
 enum class LogLevel { DEBUG, INFO, WARN, ERROR };
 
-// 异步 Logger：日志先入队，后台线程每秒批量 flush，消除同步写文件开销
-//
-// 日志轮转：借鉴 Frosty service.sh 的轮转思路（超过阈值改名为 .old），
-// 但 Frosty 只在开机时检查一次（适合短生命周期的 shell 脚本场景）；
-// 我们的 Daemon 是长期常驻进程，轮转检查放在每次批量写入之后，
-// 避免日志在数月不重启的情况下无限增长
 class Logger {
 public:
     static constexpr size_t ROTATE_THRESHOLD_BYTES = 1024 * 1024;  // 1MB
@@ -54,6 +49,10 @@ private:
 
     void open_log_file() {
         file_.open(Path::LOG_FILE, std::ios::app);
+        if (!file_.is_open()) {
+            // 文件打开失败时至少向 stderr 报告，避免无日志
+            std::cerr << "Logger: failed to open " << Path::LOG_FILE << std::endl;
+        }
     }
 
     std::string format_line(LogLevel level, const std::string& tag, const std::string& msg) {
@@ -62,11 +61,14 @@ private:
         return oss.str();
     }
 
+    // 线程安全的 localtime 封装
     std::string now_str() {
         auto now = std::chrono::system_clock::now();
         std::time_t t = std::chrono::system_clock::to_time_t(now);
+        struct tm tm_buf;
+        localtime_r(&t, &tm_buf);   // POSIX 线程安全版本
         std::ostringstream oss;
-        oss << std::put_time(std::localtime(&t), "%m-%d %H:%M:%S");
+        oss << std::put_time(&tm_buf, "%m-%d %H:%M:%S");
         return oss.str();
     }
 
@@ -80,7 +82,6 @@ private:
         return '?';
     }
 
-    // 后台线程：批量 flush（每 1 秒或队列超过 64 条时写文件）
     void flush_loop() {
         constexpr int FLUSH_INTERVAL_MS = 1000;
         constexpr size_t BATCH_THRESHOLD = 64;
@@ -107,28 +108,36 @@ private:
         while (!batch.empty()) {
             const std::string& line = batch.front();
             std::cout << line << "\n";
-            if (file_.is_open()) file_ << line << "\n";
+            if (file_.is_open()) {
+                file_ << line << "\n";
+            }
             batch.pop();
         }
-        if (file_.is_open()) file_.flush();
-        rotate_if_needed();
+        if (file_.is_open()) {
+            file_.flush();
+            rotate_if_needed();
+        } else {
+            // 尝试重新打开日志文件（可能之前轮转失败或磁盘空间恢复）
+            open_log_file();
+        }
     }
 
-    // 检查当前日志文件大小，超过阈值则轮转为 .old（覆盖旧的 .old）
     void rotate_if_needed() {
         if (!file_.is_open()) return;
-
-        // tellp() 返回当前写入位置，即累计写入字节数（append 模式下等同文件大小）
         auto size = file_.tellp();
         if (size < 0 || static_cast<size_t>(size) < ROTATE_THRESHOLD_BYTES) return;
 
         file_.close();
 
         std::string old_path = std::string(Path::LOG_FILE) + ".old";
-        std::remove(old_path.c_str());                          // 覆盖式轮转，只保留一份历史
-        std::rename(Path::LOG_FILE, old_path.c_str());
+        std::remove(old_path.c_str());
+        if (std::rename(Path::LOG_FILE, old_path.c_str()) != 0) {
+            // 如果 rename 失败，尝试重新打开原文件继续写入（避免丢失）
+            open_log_file();
+            return;
+        }
 
-        open_log_file();  // 重新打开新的空日志文件
+        open_log_file();  // 新建空日志文件
     }
 
     void stop() {
