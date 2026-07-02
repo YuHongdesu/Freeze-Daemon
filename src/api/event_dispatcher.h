@@ -2,6 +2,9 @@
 #include <string>
 #include <sstream>
 #include <unordered_map>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include "platform/bpf_loader.h"
 #include "platform/pid_cache.h"
 #include "core/freeze_engine.h"
@@ -9,12 +12,34 @@
 #include "util/file_util.h"
 #include "util/logger.h"
 
-// 接口层：eBPF 事件路由，唯一职责是 uid→包名 映射和事件分发
+// 接口层：eBPF 事件路由，唯一职责是 uid→包名 映射和事件分发。
+//
+// 关键修复：main.cpp 里的 schedule_top_app_refresh()（shell 轮询前后台）
+// 原来无条件与 eBPF 事件路径并行运行，且直接调用
+// FreezeEngine::on_app_foreground/on_app_background，完全绕开了本类的
+// on_foreground/on_background（也就绕开了 RunningCache::add）。这导致：
+//   1. 如果 eBPF 从未真正产生过前后台事件（例如 top-app cgroup 路径在
+//      新设备上找不到——即使 BpfLoader::load() 本身返回成功），
+//      RunningCache 永远是空的，息屏时 freeze_all_managed() 找不到
+//      任何要冻结的后台应用，冻结功能形同虚设。
+//   2. 即使 eBPF 正常工作，shell 轮询仍然按固定 30 秒周期反复调用
+//      on_app_foreground（哪怕前台应用没变），带来不必要的
+//      cancel_pending_timer + do_unfreeze 噪音，与 eBPF 路径产生竞态。
+//
+// 现在把 on_foreground/on_background 提升为公共、通用的"前后台切换
+// 上报"入口（不再假设调用方一定是 eBPF），main.cpp 的 shell 轮询也
+// 改为调用这两个方法而不是直接捅 FreezeEngine，这样无论前后台事件
+// 从哪条路径来，RunningCache 都能被正确维护。同时新增
+// last_ebpf_event_age_ms()，供 main.cpp 判断 eBPF 是否"看起来在正常
+// 工作"，从而只在真正需要时才让 shell 轮询接管驱动权，而不是无条件
+// 双路并行。
 class EventDispatcher {
 public:
     static constexpr const char* TAG = "Dispatcher";
 
     void dispatch(const FreezeEvent& ev) {
+        mark_ebpf_alive();
+
         // 屏幕事件不需要 uid→pkg 解析
         if (ev.type == BpfEvent::SCREEN_ON)  { on_screen_on();  return; }
         if (ev.type == BpfEvent::SCREEN_OFF) { on_screen_off(); return; }
@@ -68,7 +93,29 @@ public:
         LOG_I(TAG, "UID cache refreshed: " + std::to_string(uid_to_pkg_.size()) + " entries");
     }
 
+    // ── 通用前后台上报入口（公开，供 eBPF 路径和 main.cpp 的 shell
+    //    轮询 fallback 路径共用，确保 RunningCache 只有一处维护逻辑）──
+
+    // 供 shell 轮询判断"eBPF 最近是否还在正常产出事件"，单位毫秒。
+    // 从未收到过任何 eBPF 事件时返回一个很大的数，表示"从未健康过"。
+    int64_t last_ebpf_event_age_ms() const {
+        int64_t last = last_ebpf_event_ms_.load();
+        if (last == 0) return INT64_MAX;
+        int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        return now - last;
+    }
+
+    void notify_foreground(const std::string& pkg) { on_foreground(pkg); }
+    void notify_background(const std::string& pkg) { on_background(pkg); }
+
 private:
+    void mark_ebpf_alive() {
+        int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        last_ebpf_event_ms_.store(now);
+    }
+
     void on_foreground(const std::string& pkg) {
         current_foreground_pkg_ = pkg;
         RunningCache::instance().add(pkg);
@@ -191,5 +238,8 @@ private:
 
     std::unordered_map<uint32_t, std::string> uid_to_pkg_;
     std::string current_foreground_pkg_;
+
+    // 0 表示"从未收到过任何 eBPF 事件"；有值时是 steady_clock 毫秒时间戳
+    std::atomic<int64_t> last_ebpf_event_ms_{0};
 };
 

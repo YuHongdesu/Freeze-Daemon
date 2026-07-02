@@ -327,7 +327,15 @@ private:
     }
 
     // ── 线程池 ──
-    static constexpr int WORKER_COUNT = 1;
+    // 关键修复：之前这里被设成了 1，导致所有请求排队串行处理。
+    // /api/apps/user、/api/apps/system 内部会 popen("pm list packages ...")，
+    // 这条 shell 命令在应用较多的设备上常需要几百毫秒甚至更久；
+    // 单线程时，这类慢请求会独占唯一的 worker，导致同一时间段内
+    // 排在后面的 /api/live（3 秒轮询一次）、/api/status（前端设了
+    // 2 秒超时）等请求被阻塞甚至超时，表现为"网页显示无法连接 Daemon"、
+    // "实时状态转圈不出数据"。恢复成多线程可以让慢请求和高频轻量
+    // 请求互不阻塞。
+    static constexpr int WORKER_COUNT = 4;
 
     void accept_loop() {
         for (int i = 0; i < WORKER_COUNT; ++i)
@@ -365,14 +373,74 @@ private:
         }
     }
 
+    // 关键修复：TCP 是流式协议，一次 recv() 不保证读到完整的 HTTP 请求——
+    // header 和 body 完全可能被分成多个 TCP 段，尤其是请求体稍大或者
+    // fetch() 的具体实现把它们分开发送时。旧实现只做一次 recv 就直接
+    // 交给 parse_request，读到半截请求时 body 会被截断甚至整体丢失，
+    // 表现为"接口有时候莫名其妙不生效"。这里改成先读满 header，解析
+    // Content-Length，再循环读满声明的 body 长度，同时设读超时防止
+    // 恶意/异常连接让 worker 线程永久卡住。
+    static constexpr size_t MAX_REQUEST_BYTES = 1 * 1024 * 1024;  // 1MB 上限，防止异常超大 body 打爆内存
+    static constexpr int    RECV_TIMEOUT_SEC  = 5;
+
     void handle_client(int fd) {
-        char buf[4096] = {};
-        ssize_t n = ::recv(fd, buf, sizeof(buf) - 1, 0);
-        if (n <= 0) { ::close(fd); return; }
-        Request req = parse_request(std::string(buf, n));
+        timeval tv{RECV_TIMEOUT_SEC, 0};
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+        std::string raw;
+        char buf[4096];
+
+        // 第一阶段：读到 \r\n\r\n（header 结束）为止
+        size_t header_end = std::string::npos;
+        while (header_end == std::string::npos) {
+            ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+            if (n <= 0) { ::close(fd); return; }  // 对端关闭 / 超时 / 出错
+            raw.append(buf, n);
+            if (raw.size() > MAX_REQUEST_BYTES) { ::close(fd); return; }
+            header_end = raw.find("\r\n\r\n");
+        }
+
+        // 第二阶段：从 header 里取 Content-Length，循环读满 body
+        size_t content_length = parse_content_length(raw);
+        size_t body_have = raw.size() - (header_end + 4);
+        while (content_length > 0 && body_have < content_length) {
+            if (raw.size() > MAX_REQUEST_BYTES) { ::close(fd); return; }
+            ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+            if (n <= 0) break;  // 对端提前关闭/超时：按已收到的部分处理，不无限等
+            raw.append(buf, n);
+            body_have += n;
+        }
+
+        Request req = parse_request(raw);
         std::string resp = handle(req);
-        ::send(fd, resp.c_str(), resp.size(), 0);
+        send_all(fd, resp);
         ::close(fd);
+    }
+
+    // 大小写不敏感地从 header 里找 Content-Length（HTTP header 名不区分大小写，
+    // 不同客户端实现大小写风格不一定一致，只匹配精确的 "Content-Length:" 不够稳）
+    size_t parse_content_length(const std::string& raw) {
+        size_t header_end = raw.find("\r\n\r\n");
+        std::string headers = (header_end != std::string::npos) ? raw.substr(0, header_end) : raw;
+        std::string lower = headers;
+        for (auto& c : lower) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        auto pos = lower.find("content-length:");
+        if (pos == std::string::npos) return 0;
+        pos += 15;
+        while (pos < headers.size() && headers[pos] == ' ') pos++;
+        size_t val = 0;
+        try { val = std::stoul(headers.substr(pos)); } catch (...) { return 0; }
+        return val;
+    }
+
+    // send() 同样不保证一次写完全部数据，短写时需要循环补发
+    void send_all(int fd, const std::string& data) {
+        size_t sent = 0;
+        while (sent < data.size()) {
+            ssize_t n = ::send(fd, data.data() + sent, data.size() - sent, 0);
+            if (n <= 0) return;  // 对端已断开，放弃剩余发送
+            sent += static_cast<size_t>(n);
+        }
     }
 
     int server_fd_{-1};
