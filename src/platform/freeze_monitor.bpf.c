@@ -22,8 +22,15 @@
 #define EVT_SYS_UNFREEZE    5
 #define EVT_PROC_DIED       6
 
+// 关键修复：必须与用户态 bpf_loader.h 的 FreezeEvent 逐字节一致。
+// 之前内核侧标了 __attribute__((packed))（9 字节，uid 在 offset 1），
+// 用户态是普通对齐 struct（12 字节，uid 在 offset 4）——ring buffer
+// 里的事件被用户态用错误的偏移量解析，读到的 uid/pid 是垃圾值。
+// 现在两边都显式 packed + 显式填充 3 字节 pad，编译器默认对齐规则
+// 不再参与决定布局，双方永远逐字节一致（12 字节，与用户态 sizeof 断言吻合）。
 struct freeze_event {
     __u8  type;
+    __u8  _pad[3];
     __u32 uid;
     __u32 pid;
 } __attribute__((packed));

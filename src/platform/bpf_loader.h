@@ -4,18 +4,29 @@
 #include <functional>
 #include <thread>
 #include <atomic>
+#include <cstddef>    // offsetof
+#include <cstring>    // strcmp（原来靠间接 include 才能编译通过，显式加上更稳）
+#include <dirent.h>   // opendir/readdir/closedir，用于 top-app cgroup 路径发现
+#include <sys/stat.h> // stat/S_ISDIR
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "util/constants.h"
 #include "util/logger.h"
 
-struct FreezeEvent {
+// 关键修复：必须与内核态 freeze_monitor.bpf.c 的 freeze_event 逐字节一致。
+// 显式 packed，不依赖编译器默认对齐规则（用户态 clang/gcc 和内核态
+// bpf-target clang 的默认对齐行为可能不同，之前正是两边对齐规则
+// 不一致导致 uid/pid 被读出垃圾值）。offset 断言确保任何一边的字段
+// 顺序被意外改动时，编译期就会报错，而不是运行时静默读错内存。
+struct __attribute__((packed)) FreezeEvent {
     uint8_t  type;
     uint8_t  _pad[3];
     uint32_t uid;
     uint32_t pid;
 };
 static_assert(sizeof(FreezeEvent) == 12, "FreezeEvent must match kernel-side freeze_event layout exactly");
+static_assert(offsetof(FreezeEvent, uid) == 4, "uid offset must match kernel-side layout");
+static_assert(offsetof(FreezeEvent, pid) == 8, "pid offset must match kernel-side layout");
 
 using EventCallback = std::function<void(const FreezeEvent&)>;
 
@@ -173,6 +184,58 @@ private:
         return bpf_object__find_map_by_name(obj_, name);
     }
 
+    // 读取指定路径下的 cgroup.id，成功返回 >0 的值，失败返回 0
+    uint64_t read_cgroup_id_at(const std::string& top_app_dir) {
+        std::ifstream f(top_app_dir + "/cgroup.id");
+        if (!f.is_open()) return 0;
+        uint64_t id = 0;
+        f >> id;
+        return (!f.fail() && id > 0) ? id : 0;
+    }
+
+    // 在 base_dir 下有限深度（最多 3 层）递归查找名为 "top-app" 的目录。
+    // Android 15+ 部分厂商 ROM（含小米 HyperOS）开启了
+    // PRODUCT_CGROUP_V2_SYS_APP_ISOLATION_ENABLED 之后，原本直接挂在
+    // /sys/fs/cgroup 下的 uid/任务分组 cgroup 会被重新组织到
+    // /sys/fs/cgroup/apps/... 和 /sys/fs/cgroup/system/... 两个父目录下，
+    // 具体 top-app 是否/如何被牵连因厂商 ROM 而异，所以这里不再赌一份
+    // 写死的路径清单，而是有限深度遍历目录树直接找，找到即返回。
+    // max_depth 防止在挂载了大量子目录（如每个 uid 一个目录）的层级
+    // 里做无意义的深度扫描浪费时间。
+    std::string find_top_app_dir(const std::string& base_dir, int max_depth) {
+        if (max_depth <= 0) return "";
+        DIR* dir = opendir(base_dir.c_str());
+        if (!dir) return "";
+
+        std::string found;
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            std::string name = entry->d_name;
+            if (name == "." || name == "..") continue;
+
+            std::string full_path = base_dir + "/" + name;
+
+            // 目录名直接命中
+            if (name == "top-app") {
+                struct stat st;
+                if (stat(full_path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+                    found = full_path;
+                    break;
+                }
+            }
+
+            // 只往看起来是分组目录的地方继续下探（跳过明显的叶子文件，
+            // 用 stat 判断是否为目录，cgroupfs 下没有 d_type 时的兜底）
+            struct stat st;
+            if (stat(full_path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+                std::string sub = find_top_app_dir(full_path, max_depth - 1);
+                if (!sub.empty()) { found = sub; break; }
+            }
+        }
+        closedir(dir);
+        return found;
+    }
+
     uint64_t read_top_app_cgroup_id() {
         // 快速检测 cgroup2 是否健康
         static bool v2_healthy = []{
@@ -181,20 +244,42 @@ private:
         }();
         if (!v2_healthy) return 0;  // 静默返回，不影响 fail 计数
 
-        static const char* paths[] = {
-            "/sys/fs/cgroup/top-app/cgroup.id",
-            "/sys/fs/cgroup/cpu/top-app/cgroup.id",
-            "/sys/fs/cgroup/unified/top-app/cgroup.id",
+        // 第零步：上次遍历发现的新层级路径（如 apps/top-app），
+        // 命中就直接用，不用每次都重新走已知路径列表再遍历一次
+        if (!discovered_top_app_path_.empty()) {
+            uint64_t id = read_cgroup_id_at(discovered_top_app_path_);
+            if (id > 0) return id;
+            // 路径失效了（比如 cgroup 被重建），清空缓存，走完整流程重新找
+            discovered_top_app_path_.clear();
+        }
+
+        // 第一步：已知的传统路径，命中即返回（多数设备一次就中，
+        // 避免每 30 秒都做一次目录遍历）
+        static const char* known_paths[] = {
+            "/sys/fs/cgroup/top-app",
+            "/sys/fs/cgroup/cpu/top-app",
+            "/sys/fs/cgroup/unified/top-app",
             nullptr
         };
+        for (int i = 0; known_paths[i] != nullptr; ++i) {
+            uint64_t id = read_cgroup_id_at(known_paths[i]);
+            if (id > 0) {
+                LOG_D(TAG, "Found top-app cgroup.id=" + std::to_string(id) +
+                           " at " + std::string(known_paths[i]));
+                return id;
+            }
+        }
 
-        for (int i = 0; paths[i] != nullptr; ++i) {
-            std::ifstream f(paths[i]);
-            if (!f.is_open()) continue;
-            uint64_t id = 0;
-            f >> id;
-            if (!f.fail() && id > 0) {
-                LOG_D(TAG, "Found top-app cgroup.id=" + std::to_string(id) + " at " + paths[i]);
+        // 第二步：已知路径都没命中，说明可能是新层级结构
+        // （如 apps/top-app、system/top-app），有限深度遍历查找
+        std::string discovered = find_top_app_dir("/sys/fs/cgroup", 4);
+        if (!discovered.empty()) {
+            uint64_t id = read_cgroup_id_at(discovered);
+            if (id > 0) {
+                LOG_I(TAG, "Discovered top-app cgroup at new location: " + discovered +
+                           " (cgroup.id=" + std::to_string(id) + ")");
+                // 记住这次发现的路径，下次直接读，不用重新遍历整棵树
+                discovered_top_app_path_ = discovered;
                 return id;
             }
         }
@@ -218,4 +303,8 @@ private:
 
     static constexpr int FAIL_WARN_THRESHOLD = 3;
     int consecutive_fail_count_ = 0;
+
+    // 有限深度遍历发现的 top-app cgroup 路径缓存（应对 apps/top-app
+    // 这类新层级结构），命中一次后长期复用，避免每次都重新遍历目录树
+    std::string discovered_top_app_path_;
 };
