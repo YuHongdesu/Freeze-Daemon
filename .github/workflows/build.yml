@@ -154,6 +154,7 @@ jobs:
           mkdir -p $PKG/{bin,config,webroot,logs}
           cp module.prop                  $PKG/
           cp scripts/service.sh           $PKG/service.sh && chmod +x $PKG/service.sh
+          cp scripts/uninstall.sh           $PKG/uninstall.sh && chmod +x $PKG/uninstall.sh
           cp build/freeze_daemon          $PKG/bin/   && chmod +x $PKG/bin/freeze_daemon
           cp freeze_monitor.bpf.o         $PKG/bin/
           cp config/freeze.conf           $PKG/config/
